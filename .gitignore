@@ -14,4 +14,61 @@ patch-select/.ruff_cache/
 
 # Local sibling repos / heavy assets
 UNI/
-Tumor patch extraction/
+
+# Tumor patch extraction: keep lightweight code/model snapshot only.
+Tumor\ patch\ extraction/**
+!Tumor\ patch\ extraction/
+!Tumor\ patch\ extraction/*.py
+!Tumor\ patch\ extraction/*.md
+!Tumor\ patch\ extraction/*.txt
+!Tumor\ patch\ extraction/*.ipynb
+!Tumor\ patch\ extraction/src/
+!Tumor\ patch\ extraction/src/*.py
+!Tumor\ patch\ extraction/src/*.csv
+!Tumor\ patch\ extraction/src/*.ipynb
+!Tumor\ patch\ extraction/src/dataset/
+!Tumor\ patch\ extraction/src/dataset/*.py
+!Tumor\ patch\ extraction/src/inference/
+!Tumor\ patch\ extraction/src/inference/*.py
+!Tumor\ patch\ extraction/src/stain/
+!Tumor\ patch\ extraction/src/stain/*.py
+!Tumor\ patch\ extraction/src/utils/
+!Tumor\ patch\ extraction/src/utils/*.py
+!Tumor\ patch\ extraction/src/ref_image/
+!Tumor\ patch\ extraction/src/ref_image/target_reference_clean.png
+!Tumor\ patch\ extraction/src/results/
+!Tumor\ patch\ extraction/src/results/model_patch/
+!Tumor\ patch\ extraction/annotations_geojson/
+!Tumor\ patch\ extraction/perfect_h_e_colour_stain/
+!Tumor\ patch\ extraction/ref_tiles/
+!Tumor\ patch\ extraction/sample_patches/
+!Tumor\ patch\ extraction/src/data_test/
+!Tumor\ patch\ extraction/src/results/patches_raw/
+!Tumor\ patch\ extraction/src/results/patches_norm/
+!Tumor\ patch\ extraction/src/results/qc_out/
+!Tumor\ patch\ extraction/src/results/splits/
+!Tumor\ patch\ extraction/src/results/model_patch/*.csv
+!Tumor\ patch\ extraction/src/results/model_patch/*.json
+!Tumor\ patch\ extraction/src/results/model_patch/best.pt
+!Tumor\ patch\ extraction/**/.gitkeep
+
+# Explicitly exclude bulky local data from tumor patch extraction.
+Tumor\ patch\ extraction/annotations_geojson/**
+Tumor\ patch\ extraction/perfect_h_e_colour_stain/**
+Tumor\ patch\ extraction/ref_tiles/**
+Tumor\ patch\ extraction/sample_patches/**
+Tumor\ patch\ extraction/src/data_test/**
+Tumor\ patch\ extraction/src/results/patches_raw/**
+Tumor\ patch\ extraction/src/results/patches_norm/**
+Tumor\ patch\ extraction/src/results/qc_out/**
+Tumor\ patch\ extraction/src/results/splits/**
+Tumor\ patch\ extraction/src/results/patches_index.csv
+!Tumor\ patch\ extraction/annotations_geojson/.gitkeep
+!Tumor\ patch\ extraction/perfect_h_e_colour_stain/.gitkeep
+!Tumor\ patch\ extraction/ref_tiles/.gitkeep
+!Tumor\ patch\ extraction/sample_patches/.gitkeep
+!Tumor\ patch\ extraction/src/data_test/.gitkeep
+!Tumor\ patch\ extraction/src/results/patches_raw/.gitkeep
+!Tumor\ patch\ extraction/src/results/patches_norm/.gitkeep
+!Tumor\ patch\ extraction/src/results/qc_out/.gitkeep
+!Tumor\ patch\ extraction/src/results/splits/.gitkeep
