@@ -1,0 +1,17 @@
+.DS_Store
+**/.DS_Store
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local data/artifacts
+patch-select/data/
+patch-select/results/
+patch-select/.pytest_cache/
+patch-select/.mypy_cache/
+patch-select/.ruff_cache/
+
+# Local sibling repos / heavy assets
+UNI/
+Tumor patch extraction/
