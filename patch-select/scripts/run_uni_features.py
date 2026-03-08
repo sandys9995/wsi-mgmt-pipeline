@@ -13,11 +13,62 @@ import torch
 import yaml
 from PIL import Image
 from torchstain.torch.normalizers.macenko import TorchMacenkoNormalizer
+from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.io.wsi import open_wsi
 
 WSI_EXTS = (".svs", ".ndpi", ".mrxs", ".tif", ".tiff")
+
+
+class _WSICoordDataset(Dataset):
+    def __init__(self, slide_path: Path, coords: np.ndarray, out_size: int, scale_factor: int):
+        self.slide_path = str(slide_path)
+        self.coords = np.asarray(coords, dtype=np.int32)
+        self.out_size = int(out_size)
+        self.scale_factor = int(scale_factor)
+        self._wsi = None
+
+    def _get_wsi(self):
+        if self._wsi is None:
+            self._wsi = open_wsi(self.slide_path)
+        return self._wsi
+
+    def __len__(self) -> int:
+        return int(len(self.coords))
+
+    def __getitem__(self, idx: int):
+        x0, y0 = self.coords[int(idx)]
+        try:
+            patch = self._get_wsi().read_half_mag_patch(
+                int(x0), int(y0), out_size=self.out_size, scale_factor=self.scale_factor
+            )
+            return int(idx), patch
+        except Exception:
+            return int(idx), None
+
+    def __del__(self) -> None:
+        try:
+            if self._wsi is not None:
+                self._wsi.close()
+        except Exception:
+            pass
+
+
+def _collate_wsi_patch_batch(batch):
+    good_idx: list[int] = []
+    good_patches: list[np.ndarray] = []
+    failed = 0
+    for idx, patch in batch:
+        if patch is None:
+            failed += 1
+            continue
+        good_idx.append(int(idx))
+        good_patches.append(np.asarray(patch, dtype=np.uint8))
+    if not good_patches:
+        empty = np.zeros((0, 0, 0, 3), dtype=np.uint8)
+        return np.asarray(good_idx, dtype=np.int32), empty, int(failed)
+    return np.asarray(good_idx, dtype=np.int32), np.stack(good_patches, axis=0), int(failed)
 
 
 def _resolve_path(project_root: Path, p: str | Path) -> Path:
@@ -220,6 +271,23 @@ def main():
     ap.add_argument("--n-slides", type=int, default=None, help="Override number of slides. <=0 means all.")
     ap.add_argument("--slide-id", default=None, help="Optional single slide_id to run.")
     ap.add_argument("--overwrite", action="store_true", help="Overwrite existing done slides.")
+    ap.add_argument(
+        "--multi-worker-mode",
+        action="store_true",
+        help="Enable worker overrides for patch IO prefetch.",
+    )
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="CPU workers hint used when multi-worker mode is enabled.",
+    )
+    ap.add_argument(
+        "--io-workers",
+        type=int,
+        default=None,
+        help="Number of DataLoader workers for patch extraction from WSI.",
+    )
     args = ap.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -232,6 +300,12 @@ def main():
     uni_raw = cfg.get("uni", {})
     if not uni_raw:
         raise KeyError("Missing `uni` section in config.")
+    run_cfg = cfg.get("run", {})
+    cfg_multi = bool(run_cfg.get("multi_worker_mode", False))
+    cfg_cpu_workers = int(run_cfg.get("cpu_workers", 1))
+    cfg_io_workers = int(run_cfg.get("io_workers", 0))
+    cli_cpu_workers = int(args.workers) if args.workers is not None else cfg_cpu_workers
+    multi_worker_mode = bool(args.multi_worker_mode or cfg_multi)
 
     wsi_dirs = [_resolve_path(project_root, p) for p in _as_list(cfg["paths"]["wsi_dir"])]
     wsi_recursive = bool(cfg.get("paths", {}).get("wsi_recursive", True))
@@ -274,16 +348,22 @@ def main():
     out_patch_size = int(cfg["wsi"].get("out_patch_size", 224))
     scale_factor = int(cfg["wsi"].get("scale_factor", 2))
     batch_size = int(uni_raw.get("batch_size", 128))
+    io_workers_cfg = int(uni_raw.get("io_workers", cfg_io_workers))
+    io_workers = int(args.io_workers) if args.io_workers is not None else io_workers_cfg
     prefer_device = str(uni_raw.get("device", "auto")).strip()
     model_device = get_device(prefer_device)
     torch_device = torch.device(model_device)
     norm_device = "cpu" if model_device == "mps" else model_device
+    if multi_worker_mode and io_workers <= 0:
+        io_workers = max(1, min(8, int(cli_cpu_workers)))
+    io_workers = max(0, int(io_workers))
 
     print("\n=== UNI SETUP ===")
     print(f"Encoder: {encoder_name} checkpoint={encoder_ckpt}")
     print(f"Assets dir: {encoder_assets_dir}")
     print(f"Model device: {model_device} | Norm device: {norm_device}")
     print(f"Patch size: {out_patch_size} | Scale factor: {scale_factor} | Batch size: {batch_size}")
+    print(f"Multi-worker mode: {multi_worker_mode} | io_workers={io_workers}")
     print(f"WSI recursive scan: {wsi_recursive}")
 
     model, eval_transform = get_encoder(
@@ -348,6 +428,8 @@ def main():
             "failed": 0,
             "feature_dim": 0,
             "uni_feature_ready": False,
+            "multi_worker_mode": bool(multi_worker_mode),
+            "io_workers": int(io_workers),
         }
 
         tumor_row = tumor_lookup.get(sid, {})
@@ -444,16 +526,6 @@ def main():
             coords_df = coords_df.head(max_patches).copy()
         row["input_coords"] = int(len(coords_df))
 
-        try:
-            wsi = open_wsi(str(slide_path))
-        except Exception as e:
-            row["status"] = "failed_open_wsi"
-            row["reason"] = f"{type(e).__name__}: {e}"
-            row["elapsed_sec"] = float(time.time() - t0)
-            rows.append(row)
-            print(f"[uni] {sid}: fail(open wsi) {e}")
-            continue
-
         features_batches: list[np.ndarray] = []
         keep_idx: list[int] = []
         fail_count = 0
@@ -472,38 +544,95 @@ def main():
             tensors = []
             idxs = []
 
-        try:
-            for i, r in coords_df.iterrows():
-                x0 = _to_int(r.get("x0", 0), 0)
-                y0 = _to_int(r.get("y0", 0), 0)
-                try:
-                    patch = wsi.read_half_mag_patch(x0, y0, out_size=out_patch_size, scale_factor=scale_factor)
-                    pil = Image.fromarray(patch, mode="RGB")
-                    if macenko is not None:
-                        tensor255 = pil_to_tensor255_chw(pil).to(norm_device)
-                        norm_out = macenko.normalize(tensor255)
-                        norm_t = norm_out[0] if isinstance(norm_out, (tuple, list)) else norm_out
-                        norm_t = norm_t.detach().cpu()
-                        if norm_t.ndim == 3 and norm_t.shape[0] == 3:
-                            arr = norm_t.permute(1, 2, 0).numpy()
-                        else:
-                            arr = norm_t.numpy()
-                        if arr.max() <= 5.0:
-                            arr = np.clip(arr, 0.0, 1.0) * 255.0
-                        arr = np.clip(arr, 0.0, 255.0).astype(np.uint8)
-                        pil = Image.fromarray(arr, mode="RGB")
-
-                    t = eval_transform(pil)
-                    tensors.append(t)
-                    idxs.append(i)
-                    if len(tensors) >= batch_size:
-                        flush_batch()
-                except Exception:
-                    fail_count += 1
+        if io_workers > 0:
+            coords_arr = coords_df[["x0", "y0"]].to_numpy(dtype=np.int32)
+            dataset = _WSICoordDataset(
+                slide_path=slide_path,
+                coords=coords_arr,
+                out_size=out_patch_size,
+                scale_factor=scale_factor,
+            )
+            loader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=int(io_workers),
+                pin_memory=bool(model_device == "cuda"),
+                collate_fn=_collate_wsi_patch_batch,
+                persistent_workers=bool(io_workers > 0),
+            )
+            for batch_pack in loader:
+                if batch_pack is None:
                     continue
-            flush_batch()
-        finally:
-            wsi.close()
+                batch_idxs, patches, batch_fail = batch_pack
+                fail_count += int(batch_fail)
+                for local_i, patch in enumerate(patches):
+                    src_idx = int(batch_idxs[local_i])
+                    try:
+                        pil = Image.fromarray(np.asarray(patch, dtype=np.uint8), mode="RGB")
+                        if macenko is not None:
+                            tensor255 = pil_to_tensor255_chw(pil).to(norm_device)
+                            norm_out = macenko.normalize(tensor255)
+                            norm_t = norm_out[0] if isinstance(norm_out, (tuple, list)) else norm_out
+                            norm_t = norm_t.detach().cpu()
+                            if norm_t.ndim == 3 and norm_t.shape[0] == 3:
+                                arr = norm_t.permute(1, 2, 0).numpy()
+                            else:
+                                arr = norm_t.numpy()
+                            if arr.max() <= 5.0:
+                                arr = np.clip(arr, 0.0, 1.0) * 255.0
+                            arr = np.clip(arr, 0.0, 255.0).astype(np.uint8)
+                            pil = Image.fromarray(arr, mode="RGB")
+                        t = eval_transform(pil)
+                        tensors.append(t)
+                        idxs.append(src_idx)
+                    except Exception:
+                        fail_count += 1
+                        continue
+                flush_batch()
+        else:
+            try:
+                wsi = open_wsi(str(slide_path))
+            except Exception as e:
+                row["status"] = "failed_open_wsi"
+                row["reason"] = f"{type(e).__name__}: {e}"
+                row["elapsed_sec"] = float(time.time() - t0)
+                rows.append(row)
+                print(f"[uni] {sid}: fail(open wsi) {e}")
+                continue
+
+            try:
+                for i, r in coords_df.iterrows():
+                    x0 = _to_int(r.get("x0", 0), 0)
+                    y0 = _to_int(r.get("y0", 0), 0)
+                    try:
+                        patch = wsi.read_half_mag_patch(x0, y0, out_size=out_patch_size, scale_factor=scale_factor)
+                        pil = Image.fromarray(patch, mode="RGB")
+                        if macenko is not None:
+                            tensor255 = pil_to_tensor255_chw(pil).to(norm_device)
+                            norm_out = macenko.normalize(tensor255)
+                            norm_t = norm_out[0] if isinstance(norm_out, (tuple, list)) else norm_out
+                            norm_t = norm_t.detach().cpu()
+                            if norm_t.ndim == 3 and norm_t.shape[0] == 3:
+                                arr = norm_t.permute(1, 2, 0).numpy()
+                            else:
+                                arr = norm_t.numpy()
+                            if arr.max() <= 5.0:
+                                arr = np.clip(arr, 0.0, 1.0) * 255.0
+                            arr = np.clip(arr, 0.0, 255.0).astype(np.uint8)
+                            pil = Image.fromarray(arr, mode="RGB")
+
+                        t = eval_transform(pil)
+                        tensors.append(t)
+                        idxs.append(i)
+                        if len(tensors) >= batch_size:
+                            flush_batch()
+                    except Exception:
+                        fail_count += 1
+                        continue
+                flush_batch()
+            finally:
+                wsi.close()
 
         if features_batches:
             feats = np.vstack(features_batches)
@@ -564,6 +693,8 @@ def main():
             "encoder_name": encoder_name,
             "coord_source": coord_source,
             "use_macenko": use_macenko,
+            "multi_worker_mode": multi_worker_mode,
+            "io_workers": int(io_workers),
             "output_dtype": output_dtype,
             "timestamp_unix": int(time.time()),
         }

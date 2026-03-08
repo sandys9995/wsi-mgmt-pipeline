@@ -68,6 +68,20 @@ nohup python -u scripts/run_e2e.py --config configs/pilot.yaml > logs/e2e_full_$
 tail -f logs/e2e_full_*.log
 ```
 
+## 10) Multi-Worker End-to-End Run (Cluster)
+
+Use this to activate end-to-end worker mode from one command.
+
+```bash
+nohup python -u scripts/run_e2e.py \
+  --config configs/pilot.yaml \
+  --multi-worker-mode \
+  --cpu-workers 16 \
+  --io-workers 8 \
+  > logs/e2e_mw_$(date +%F_%H%M).log 2>&1 &
+tail -f logs/e2e_mw_*.log
+```
+
 ## Optional Single-Slide Commands
 
 Single slide UNI:

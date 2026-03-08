@@ -566,6 +566,23 @@ def main():
         action="store_true",
         help="Do not rescore. Read existing all_scored/topk_scored and export high_tumor_only + summary gate fields.",
     )
+    parser.add_argument(
+        "--multi-worker-mode",
+        action="store_true",
+        help="Enable worker overrides from run config for stage execution.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="CPU workers hint from run config (reserved for stage-level parallelism).",
+    )
+    parser.add_argument(
+        "--io-workers",
+        type=int,
+        default=None,
+        help="IO worker hint from run config (reserved for patch-loading paths).",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -575,6 +592,15 @@ def main():
 
     with cfg_path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    run_cfg = cfg.get("run", {})
+    cfg_multi = bool(run_cfg.get("multi_worker_mode", False))
+    cfg_cpu_workers = int(run_cfg.get("cpu_workers", 1))
+    cfg_io_workers = int(run_cfg.get("io_workers", 0))
+    multi_worker_mode = bool(args.multi_worker_mode or cfg_multi)
+    cpu_workers = int(args.workers) if args.workers is not None else cfg_cpu_workers
+    io_workers = int(args.io_workers) if args.io_workers is not None else int(cfg_io_workers)
+    cpu_workers = max(1, cpu_workers)
+    io_workers = max(0, io_workers)
 
     raw_wsi_dirs = _as_list(cfg["paths"].get("wsi_dir", "data/raw_wsi"))
     wsi_recursive = bool(cfg["paths"].get("wsi_recursive", True))
@@ -595,6 +621,7 @@ def main():
         "save_preview_patches": bool(tg_raw.get("save_preview_patches", True)),
         "save_preview_limit": int(tg_raw.get("save_preview_limit", 200)),
         "save_preview_normalized": bool(tg_raw.get("save_preview_normalized", True)),
+        "io_workers": int(tg_raw.get("io_workers", io_workers)),
         "prefer_qc_pool": bool(tg_raw.get("prefer_qc_pool", True)),
         "export_high_only": bool(tg_raw.get("export_high_only", True)),
         "high_only_source": str(tg_raw.get("high_only_source", "all_scored")),
@@ -650,6 +677,10 @@ def main():
         print(f"[tumor-gate] model_path={model_path}")
         print(f"[tumor-gate] reference_tile={reference_tile_path}")
         print(f"[tumor-gate] topk={tg_cfg['topk']} tumor_thr={tg_cfg['tumor_thr']:.3f}")
+        print(
+            f"[tumor-gate] multi_worker_mode={multi_worker_mode} "
+            f"cpu_workers={cpu_workers} io_workers={int(tg_cfg['io_workers'])}"
+        )
         model = load_model(model_path, model_device)
         normalizer = build_normalizer(reference_tile_path, norm_device)
     by_center: dict[str, list[str]] = {}

@@ -345,6 +345,17 @@ def main():
     parser.add_argument("--config", default="configs/pilot.yaml", help="Path to config yaml.")
     parser.add_argument("--n-slides", type=int, default=None, help="Override number of slides. <=0 means all.")
     parser.add_argument("--slide-id", default=None, help="Optional single slide_id to run.")
+    parser.add_argument(
+        "--multi-worker-mode",
+        action="store_true",
+        help="Enable worker overrides from run config (mask stage remains deterministic single-process).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="CPU worker hint from run config.",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -516,6 +527,12 @@ def main():
     if cfg_path.exists():
         with cfg_path.open("r") as f:
             pilot_cfg = yaml.safe_load(f) or {}
+        run_cfg = pilot_cfg.get("run", {})
+        cfg_multi = bool(run_cfg.get("multi_worker_mode", False))
+        cfg_workers = int(run_cfg.get("cpu_workers", 1))
+        multi_worker_mode = bool(args.multi_worker_mode or cfg_multi)
+        workers = int(args.workers) if args.workers is not None else int(cfg_workers)
+        workers = max(1, workers)
         paths_cfg = pilot_cfg.get("paths", {})
         raw_wsi_dirs = paths_cfg.get("wsi_dir", "data/raw_wsi")
         wsi_recursive = bool(paths_cfg.get("wsi_recursive", True))
@@ -526,6 +543,8 @@ def main():
         mask_cfg = dict(default_mask_cfg)
         mask_cfg.update(pilot_cfg.get("mask", {}))
     else:
+        multi_worker_mode = bool(args.multi_worker_mode)
+        workers = max(1, int(args.workers) if args.workers is not None else 1)
         wsi_dirs = [_resolve_path(project_root, "data/raw_wsi")]
         wsi_recursive = True
         mask_cfg = default_mask_cfg
@@ -565,6 +584,7 @@ def main():
 
     print(f"WSI dirs: {[str(p) for p in wsi_dirs]}")
     print(f"WSI recursive scan: {wsi_recursive}")
+    print(f"Multi-worker mode: {multi_worker_mode} (workers={workers})")
     print(f"Found {len(wsis)} WSIs")
 
     by_center_rows: dict[str, list[dict]] = {}

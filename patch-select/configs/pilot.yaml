@@ -2,6 +2,9 @@ run:
   name: pilot18
   n_slides: 0
   seed: 1337
+  multi_worker_mode: false
+  cpu_workers: 8
+  io_workers: 4
 
 paths:
   wsi_dir: data/raw_wsi
@@ -224,6 +227,7 @@ tumor_gate:
   tumor_thr: 0.738
   mid_thr: 0.50
   batch_size: 256
+  io_workers: 4
   prefer_qc_pool: true
   export_high_only: true
   high_only_source: all_scored
@@ -243,6 +247,7 @@ uni:
   assets_dir: ../UNI/assets/ckpts
   device: auto
   batch_size: 128
+  io_workers: 4
   coord_source: high_tumor_only
   use_uni_ready_only: true
   max_patches_per_slide: 5000

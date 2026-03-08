@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +114,17 @@ def main():
     parser.add_argument("--config", default="configs/pilot.yaml", help="Path to config yaml.")
     parser.add_argument("--n-slides", type=int, default=None, help="Override number of slides. <=0 means all.")
     parser.add_argument(
+        "--multi-worker-mode",
+        action="store_true",
+        help="Enable parallel center execution when possible.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="CPU workers for center-parallel execution.",
+    )
+    parser.add_argument(
         "--precheck-only",
         action="store_true",
         help="Validate mask coverage/readiness for selected slides and exit without extraction.",
@@ -126,6 +138,12 @@ def main():
 
     with cfg_path.open("r") as f:
         cfg = yaml.safe_load(f)
+    run_cfg = cfg.get("run", {})
+    cfg_multi = bool(run_cfg.get("multi_worker_mode", False))
+    cfg_workers = int(run_cfg.get("cpu_workers", 1))
+    multi_worker_mode = bool(args.multi_worker_mode or cfg_multi)
+    workers = int(args.workers) if args.workers is not None else int(cfg_workers)
+    workers = max(1, workers)
 
     raw_wsi_dirs = _as_list(cfg["paths"].get("wsi_dir", "data/raw_wsi"))
     wsi_recursive = bool(cfg["paths"].get("wsi_recursive", True))
@@ -151,6 +169,7 @@ def main():
     print(f"Config: {cfg_path}")
     print(f"WSI dirs: {[str(p) for p in wsi_dirs]}")
     print(f"WSI recursive scan: {wsi_recursive}")
+    print(f"Multi-worker mode: {multi_worker_mode} (workers={workers})")
     print(f"Mask dir: {mask_dir}")
     print(f"Out dir:  {out_dir}")
     print(f"Slides ({len(slide_items)}):")
@@ -162,6 +181,7 @@ def main():
         by_center.setdefault(center, []).append(sp)
 
     all_ok = True
+    center_jobs: list[tuple[str, list[str], dict]] = []
     for center, center_slides in sorted(by_center.items()):
         center_mask_dir = mask_dir / center / "mask"
         center_out_dir = out_dir / center
@@ -174,13 +194,32 @@ def main():
         if not precheck_ok:
             all_ok = False
             continue
-        if not args.precheck_only:
-            run_on_slides(center_slides, center_cfg)
+        center_jobs.append((center, center_slides, center_cfg))
 
     if not all_ok:
         raise SystemExit(1)
     if args.precheck_only:
         return
+
+    if multi_worker_mode and workers > 1 and len(center_jobs) > 1:
+        n_pool = min(workers, len(center_jobs))
+        print(f"Running QC extraction in parallel across centers (workers={n_pool})")
+        with ThreadPoolExecutor(max_workers=n_pool) as ex:
+            fut_map = {
+                ex.submit(run_on_slides, center_slides, center_cfg): center
+                for center, center_slides, center_cfg in center_jobs
+            }
+            for fut in as_completed(fut_map):
+                center = fut_map[fut]
+                try:
+                    fut.result()
+                    print(f"Center completed: {center}")
+                except Exception as e:
+                    print(f"Center failed: {center} ({type(e).__name__}: {e})")
+                    raise
+    else:
+        for center, center_slides, center_cfg in center_jobs:
+            run_on_slides(center_slides, center_cfg)
 
     # Aggregate per-center QC summaries into a global summary for gate checks.
     agg_rows: list[pd.DataFrame] = []

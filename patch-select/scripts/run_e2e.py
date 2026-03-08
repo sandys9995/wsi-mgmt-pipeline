@@ -63,6 +63,23 @@ def main() -> None:
     )
     ap.add_argument("--n-slides", type=int, default=None, help="Override n_slides for qc/tumor/uni stages.")
     ap.add_argument(
+        "--multi-worker-mode",
+        action="store_true",
+        help="Enable multi-worker mode across stages where supported.",
+    )
+    ap.add_argument(
+        "--cpu-workers",
+        type=int,
+        default=None,
+        help="Override CPU worker count for stages that support it.",
+    )
+    ap.add_argument(
+        "--io-workers",
+        type=int,
+        default=None,
+        help="Override IO worker count for patch-reading heavy stages (tumor/uni).",
+    )
+    ap.add_argument(
         "--smoke-gate",
         action="store_true",
         help="Relax gate thresholds for smoke runs (dataset>=1, digital>=0).",
@@ -89,6 +106,12 @@ def main() -> None:
     print(f"Stages: {stages}")
     if args.n_slides is not None:
         print(f"n_slides override: {args.n_slides}")
+    if args.multi_worker_mode:
+        print("multi_worker_mode: enabled")
+    if args.cpu_workers is not None:
+        print(f"cpu_workers override: {args.cpu_workers}")
+    if args.io_workers is not None:
+        print(f"io_workers override: {args.io_workers}")
     if args.smoke_gate:
         print("smoke_gate: enabled (dataset-pass-min=1, digital-pass-min=0)")
 
@@ -97,10 +120,18 @@ def main() -> None:
             cmd = [python, "-u", "scripts/make_masks.py", "--config", str(cfg_path)]
             if args.n_slides is not None:
                 cmd += ["--n-slides", str(args.n_slides)]
+            if args.multi_worker_mode:
+                cmd += ["--multi-worker-mode"]
+            if args.cpu_workers is not None:
+                cmd += ["--workers", str(args.cpu_workers)]
         elif stage == "qc":
             cmd = [python, "-u", "scripts/run_pilot.py", "--config", str(cfg_path)]
             if args.n_slides is not None:
                 cmd += ["--n-slides", str(args.n_slides)]
+            if args.multi_worker_mode:
+                cmd += ["--multi-worker-mode"]
+            if args.cpu_workers is not None:
+                cmd += ["--workers", str(args.cpu_workers)]
         elif stage == "gate":
             cmd = [
                 python,
@@ -117,10 +148,22 @@ def main() -> None:
             cmd = [python, "-u", "scripts/run_tumor_gate_pilot.py", "--config", str(cfg_path)]
             if args.n_slides is not None:
                 cmd += ["--n-slides", str(args.n_slides)]
+            if args.multi_worker_mode:
+                cmd += ["--multi-worker-mode"]
+            if args.cpu_workers is not None:
+                cmd += ["--workers", str(args.cpu_workers)]
+            if args.io_workers is not None:
+                cmd += ["--io-workers", str(args.io_workers)]
         elif stage == "uni":
             cmd = [python, "-u", "scripts/run_uni_features.py", "--config", str(cfg_path)]
             if args.n_slides is not None:
                 cmd += ["--n-slides", str(args.n_slides)]
+            if args.multi_worker_mode:
+                cmd += ["--multi-worker-mode"]
+            if args.cpu_workers is not None:
+                cmd += ["--workers", str(args.cpu_workers)]
+            if args.io_workers is not None:
+                cmd += ["--io-workers", str(args.io_workers)]
             if args.overwrite_uni:
                 cmd += ["--overwrite"]
         else:
