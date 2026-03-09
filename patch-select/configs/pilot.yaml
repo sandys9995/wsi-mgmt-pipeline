@@ -223,7 +223,7 @@ outputs:
 
 tumor_gate:
   # Stage-2 pilot: run Macenko + ResNet tumor scoring on selected_meta.csv outputs.
-  out_dir: data/out/tumor_gate
+  out_dir: data/out
   model_path: "../Tumor patch extraction/src/results/model_patch/best.pt"
   reference_tile_path: "../Tumor patch extraction/src/ref_image/target_reference_clean.png"
   topk: 5000
@@ -244,7 +244,7 @@ tumor_gate:
 
 uni:
   # Stage-3: extract UNI features from tumor-gated coordinates.
-  out_dir: data/out/uni
+  out_dir: data/out
   uni_repo_dir: ../UNI
   encoder_name: uni2-h
   checkpoint: pytorch_model.bin
