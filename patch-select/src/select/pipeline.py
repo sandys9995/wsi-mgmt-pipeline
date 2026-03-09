@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 from pathlib import Path
 import pandas as pd
+from tqdm import tqdm
 
 def _stem(p: str) -> str:
     return Path(p).stem
@@ -161,7 +162,7 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
     max_artifact_frac = float(cfg["qc"].get("max_artifact_frac", 0.30))
     max_rbc_frac = float(cfg["qc"].get("max_rbc_frac", 0.45))
 
-    for sp in slide_paths:
+    for sp in tqdm(slide_paths, desc="[qc] slides", unit="slide", dynamic_ncols=True):
         sid = _stem(sp)
         print(f"\n=== {sid} ===")
         wsi = open_wsi(sp)
@@ -252,7 +253,9 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
 
         # read half-mag patches (448@0 -> 224)
         tiles = np.zeros((len(xy0), out_size, out_size, 3), dtype=np.uint8)
-        for i, (x0, y0) in enumerate(xy0):
+        for i, (x0, y0) in enumerate(
+            tqdm(xy0, desc=f"[qc] {sid} read", unit="patch", dynamic_ncols=True, leave=False)
+        ):
             tiles[i] = wsi.read_half_mag_patch(
                 int(x0), int(y0), out_size=out_size, scale_factor=scale_factor
             )
@@ -489,6 +492,17 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
         wsi.close()
 
     if run_summary_rows:
+        run_summary_path = qc_root / "run_summary.csv"
         run_summary = pd.DataFrame(run_summary_rows).sort_values("slide_id").reset_index(drop=True)
-        run_summary.to_csv(qc_root / "run_summary.csv", index=False)
-        print(f"Run summary -> {qc_root / 'run_summary.csv'}")
+        if run_summary_path.exists():
+            prev = pd.read_csv(run_summary_path, dtype={"slide_id": "string"})
+            prev["slide_id"] = prev["slide_id"].astype(str).str.strip()
+            run_summary["slide_id"] = run_summary["slide_id"].astype(str).str.strip()
+            run_summary = pd.concat([prev, run_summary], ignore_index=True, sort=False)
+            run_summary = (
+                run_summary.drop_duplicates(subset=["slide_id"], keep="last")
+                .sort_values("slide_id")
+                .reset_index(drop=True)
+            )
+        run_summary.to_csv(run_summary_path, index=False)
+        print(f"Run summary -> {run_summary_path}")

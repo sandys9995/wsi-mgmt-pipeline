@@ -583,6 +583,11 @@ def main():
         default=None,
         help="IO worker hint from run config (reserved for patch-loading paths).",
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing tumor-gate slide outputs; otherwise reuse existing scored csv when present.",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -622,6 +627,7 @@ def main():
         "save_preview_limit": int(tg_raw.get("save_preview_limit", 200)),
         "save_preview_normalized": bool(tg_raw.get("save_preview_normalized", True)),
         "io_workers": int(tg_raw.get("io_workers", io_workers)),
+        "overwrite": bool(tg_raw.get("overwrite", False) or args.overwrite),
         "prefer_qc_pool": bool(tg_raw.get("prefer_qc_pool", True)),
         "export_high_only": bool(tg_raw.get("export_high_only", True)),
         "high_only_source": str(tg_raw.get("high_only_source", "all_scored")),
@@ -679,7 +685,8 @@ def main():
         print(f"[tumor-gate] topk={tg_cfg['topk']} tumor_thr={tg_cfg['tumor_thr']:.3f}")
         print(
             f"[tumor-gate] multi_worker_mode={multi_worker_mode} "
-            f"cpu_workers={cpu_workers} io_workers={int(tg_cfg['io_workers'])}"
+            f"cpu_workers={cpu_workers} io_workers={int(tg_cfg['io_workers'])} "
+            f"overwrite={bool(tg_cfg['overwrite'])}"
         )
         model = load_model(model_path, model_device)
         normalizer = build_normalizer(reference_tile_path, norm_device)
@@ -688,7 +695,9 @@ def main():
         by_center.setdefault(center, []).append(sp)
 
     rows: list[dict] = []
-    for center, center_slides in sorted(by_center.items()):
+    for center, center_slides in tqdm(
+        sorted(by_center.items()), desc="[tumor-gate] centers", unit="center", dynamic_ncols=True
+    ):
         center_out_dir = out_dir / center
         coords_root = center_out_dir / "coords"
         qc_pool_root = center_out_dir / "qc_pool"
@@ -697,7 +706,7 @@ def main():
         center_tumor_out_root.mkdir(parents=True, exist_ok=True)
         print(f"[tumor-gate] center={center} slides={len(center_slides)}")
 
-        for sp in center_slides:
+        for sp in tqdm(center_slides, desc=f"[tumor-gate] {center} slides", unit="slide", dynamic_ncols=True, leave=False):
             slide_path = Path(sp)
             sid = slide_path.stem
             selected_meta_path = coords_root / sid / "selected_meta.csv"
@@ -706,7 +715,50 @@ def main():
             out_slide_dir = center_tumor_out_root / sid
 
             used_input_source = "missing"
-            if args.filter_only:
+            if (not args.filter_only) and (not bool(tg_cfg["overwrite"])):
+                in_df = _read_filter_source(out_slide_dir)
+                if in_df is not None and "tumor_prob" in in_df.columns:
+                    in_df = in_df.copy()
+                    in_df["tumor_band"] = np.where(
+                        in_df["tumor_prob"] >= tg_cfg["tumor_thr"],
+                        "high_tumor",
+                        np.where(in_df["tumor_prob"] >= tg_cfg["mid_thr"], "mid_tumor", "low_tumor"),
+                    )
+                    write_out = _write_scored_outputs(out_slide_dir=out_slide_dir, scored=in_df, cfg=tg_cfg)
+                    scored_ok = int(len(in_df))
+                    n_high = int((in_df["tumor_prob"] >= tg_cfg["tumor_thr"]).sum())
+                    n_mid = int(
+                        ((in_df["tumor_prob"] >= tg_cfg["mid_thr"]) & (in_df["tumor_prob"] < tg_cfg["tumor_thr"])).sum()
+                    )
+                    n_low = int((in_df["tumor_prob"] < tg_cfg["mid_thr"]).sum())
+                    row = {
+                        "slide_id": sid,
+                        "selected_input": scored_ok,
+                        "scored_ok": scored_ok,
+                        "norm_or_read_fail": 0,
+                        "tumor_prob_ge_thr": n_high,
+                        "tumor_prob_mid": n_mid,
+                        "tumor_prob_low": n_low,
+                        "kept_topk": int(write_out["kept_topk"]),
+                        "high_tumor_only_count": int(write_out["high_tumor_only_count"]),
+                        "high_only_source": str(write_out["high_only_source"]),
+                        "high_ratio": float(n_high / max(scored_ok, 1)),
+                        "tumor_thr": tg_cfg["tumor_thr"],
+                        "mid_thr": tg_cfg["mid_thr"],
+                        "selected_meta_missing": False,
+                    }
+                    row = _apply_uni_gate_fields(row, tg_cfg)
+                    used_input_source = "existing_scores_skip"
+                else:
+                    # fall through to normal scoring path
+                    in_df = None
+                    row = None
+            else:
+                row = None
+
+            if row is not None:
+                pass
+            elif args.filter_only:
                 in_df = _read_filter_source(out_slide_dir)
                 if in_df is None or "tumor_prob" not in in_df.columns:
                     row = {
@@ -830,6 +882,17 @@ def main():
     if rows:
         df = pd.DataFrame(rows).sort_values("slide_id").reset_index(drop=True)
         out_csv = tumor_out_root / "run_summary.csv"
+        if out_csv.exists():
+            prev = pd.read_csv(out_csv, dtype={"slide_id": "string"})
+            prev["slide_id"] = prev["slide_id"].astype(str).str.strip()
+            if "center" in prev.columns:
+                prev["center"] = prev["center"].astype(str).str.strip()
+            df["slide_id"] = df["slide_id"].astype(str).str.strip()
+            if "center" in df.columns:
+                df["center"] = df["center"].astype(str).str.strip()
+            subset = ["center", "slide_id"] if "center" in df.columns else ["slide_id"]
+            df = pd.concat([prev, df], ignore_index=True, sort=False)
+            df = df.drop_duplicates(subset=subset, keep="last").sort_values(subset).reset_index(drop=True)
         df.to_csv(out_csv, index=False)
         print(f"[tumor-gate] run summary -> {out_csv}")
 

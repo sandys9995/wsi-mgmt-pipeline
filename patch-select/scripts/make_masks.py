@@ -10,6 +10,7 @@ import pandas as pd
 import cv2
 import sys
 import yaml
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.preprocess.masking import compute_mask_status_fields, select_mask_with_fallback
@@ -589,7 +590,7 @@ def main():
 
     by_center_rows: dict[str, list[dict]] = {}
 
-    for p, center in wsis:
+    for p, center in tqdm(wsis, desc="[mask] slides", unit="slide", dynamic_ncols=True):
         stem = p.stem
         center_mask_dir = mask_dir / str(center) / "mask"
         center_mask_dir.mkdir(parents=True, exist_ok=True)

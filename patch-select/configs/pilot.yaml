@@ -5,6 +5,9 @@ run:
   multi_worker_mode: false
   cpu_workers: 8
   io_workers: 4
+  resume: true
+  continue_on_fail: true
+  strict_gate: false
 
 paths:
   wsi_dir: data/raw_wsi
@@ -141,7 +144,7 @@ mask:
   reference_patches_dir: ../Tumor patch extraction/src/results/patches_raw
   reference_sample_patches: 400
   reference_seed: 1337
-  overwrite: true
+  overwrite: false
   low_tissue_retry_enabled: true
   low_tissue_retry_ds: 32.0
   low_tissue_retry_min_black_frac: 0.70
@@ -228,6 +231,7 @@ tumor_gate:
   mid_thr: 0.50
   batch_size: 256
   io_workers: 4
+  overwrite: false
   prefer_qc_pool: true
   export_high_only: true
   high_only_source: all_scored

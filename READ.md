@@ -86,6 +86,9 @@ Notes:
 - Gate is non-blocking by default in `run_e2e.py` (pipeline continues to tumor/uni even if gate fails).
 - Use `--strict-gate` if you want gate failure to stop the run.
 - Use `--continue-on-fail` to continue even if non-gate stages fail.
+- Gate uses adaptive thresholds by default (small pilots no longer fail only due sample size).
+- Resume is enabled by default (`run.resume: true`) so reruns skip slides that already have QC outputs.
+- Long loops now show `tqdm` progress bars in `run_e2e.py`, `make_masks.py`, `run_pilot.py`, `run_tumor_gate_pilot.py`, `run_uni_features.py`, and QC patch reads in `src/select/pipeline.py`.
 
 ## Optional Single-Slide Commands
 

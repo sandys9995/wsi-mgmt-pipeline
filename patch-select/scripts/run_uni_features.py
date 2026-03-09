@@ -14,6 +14,7 @@ import yaml
 from PIL import Image
 from torchstain.torch.normalizers.macenko import TorchMacenkoNormalizer
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.io.wsi import open_wsi
@@ -414,7 +415,7 @@ def main():
     print(f"output_dtype={output_dtype} overwrite={overwrite} merge_run_summary={merge_run_summary}")
 
     rows: list[dict[str, Any]] = []
-    for slide_path, center in slide_items:
+    for slide_path, center in tqdm(slide_items, desc="[uni] slides", unit="slide", dynamic_ncols=True):
         sid = slide_path.stem
         t0 = time.time()
         row: dict[str, Any] = {
@@ -561,7 +562,7 @@ def main():
                 collate_fn=_collate_wsi_patch_batch,
                 persistent_workers=bool(io_workers > 0),
             )
-            for batch_pack in loader:
+            for batch_pack in tqdm(loader, desc=f"[uni] {sid} batches", unit="batch", dynamic_ncols=True, leave=False):
                 if batch_pack is None:
                     continue
                 batch_idxs, patches, batch_fail = batch_pack
@@ -602,7 +603,14 @@ def main():
                 continue
 
             try:
-                for i, r in coords_df.iterrows():
+                for i, r in tqdm(
+                    coords_df.iterrows(),
+                    total=len(coords_df),
+                    desc=f"[uni] {sid} patches",
+                    unit="patch",
+                    dynamic_ncols=True,
+                    leave=False,
+                ):
                     x0 = _to_int(r.get("x0", 0), 0)
                     y0 = _to_int(r.get("y0", 0), 0)
                     try:

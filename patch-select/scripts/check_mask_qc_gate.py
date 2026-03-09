@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 import sys
 
@@ -17,14 +18,48 @@ def _pick_status(row: pd.Series) -> str:
     return s
 
 
+def _parse_statuses(raw: str) -> set[str]:
+    out: set[str] = set()
+    for s in str(raw).split(","):
+        v = s.strip().lower()
+        if v:
+            out.add(v)
+    if not out:
+        out = {"ok"}
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Check mask+QC acceptance gate.")
     ap.add_argument("--mask-summary", default="data/masks/mask_summary.csv")
     ap.add_argument("--run-summary", default="data/out/qc/run_summary.csv")
+    ap.add_argument(
+        "--mode",
+        choices=["adaptive", "strict"],
+        default="adaptive",
+        help="adaptive: thresholds scale with run size; strict: fixed absolute thresholds.",
+    )
+    ap.add_argument(
+        "--ok-statuses",
+        default="ok,high_tissue",
+        help="Comma-separated mask statuses accepted by gate.",
+    )
     ap.add_argument("--min-candidates", type=int, default=200)
     ap.add_argument("--min-qc-pass", type=int, default=80)
     ap.add_argument("--dataset-pass-min", type=int, default=16)
     ap.add_argument("--digital-pass-min", type=int, default=3)
+    ap.add_argument(
+        "--dataset-pass-rate",
+        type=float,
+        default=16.0 / 18.0,
+        help="Adaptive mode: required passed fraction of all slides.",
+    )
+    ap.add_argument(
+        "--digital-pass-rate",
+        type=float,
+        default=3.0 / 4.0,
+        help="Adaptive mode: required passed fraction of DigitalSlide* subset.",
+    )
     args = ap.parse_args()
 
     mask_path = Path(args.mask_summary)
@@ -51,11 +86,13 @@ def main() -> int:
         suffixes=("", "_run"),
     )
 
+    ok_statuses = _parse_statuses(args.ok_statuses)
     merged["status_for_gate"] = merged.apply(_pick_status, axis=1)
+    merged["status_for_gate_norm"] = merged["status_for_gate"].astype(str).str.strip().str.lower()
     merged["candidates_after_mask"] = merged["candidates_after_mask"].fillna(0).astype(int)
     merged["qc_pass"] = merged["qc_pass"].fillna(0).astype(int)
     merged["slide_pass"] = (
-        (merged["status_for_gate"] == "ok")
+        (merged["status_for_gate_norm"].isin(ok_statuses))
         & (merged["candidates_after_mask"] >= int(args.min_candidates))
         & (merged["qc_pass"] >= int(args.min_qc_pass))
     )
@@ -66,9 +103,18 @@ def main() -> int:
     n_digital = int(is_digital.sum())
     n_digital_pass = int((merged["slide_pass"] & is_digital).sum())
 
+    if args.mode == "strict":
+        req_dataset = int(args.dataset_pass_min)
+        req_digital = int(args.digital_pass_min)
+    else:
+        req_dataset = int(math.ceil(float(args.dataset_pass_rate) * max(0, n_total))) if n_total > 0 else 0
+        req_digital = int(math.ceil(float(args.digital_pass_rate) * max(0, n_digital))) if n_digital > 0 else 0
+
     print("Mask+QC Gate")
-    print(f"- Slides: {n_pass}/{n_total} passed (required >= {args.dataset_pass_min})")
-    print(f"- DigitalSlide: {n_digital_pass}/{n_digital} passed (required >= {args.digital_pass_min})")
+    print(f"- Mode: {args.mode}")
+    print(f"- Accepted statuses: {sorted(ok_statuses)}")
+    print(f"- Slides: {n_pass}/{n_total} passed (required >= {req_dataset})")
+    print(f"- DigitalSlide: {n_digital_pass}/{n_digital} passed (required >= {req_digital})")
 
     failed = merged.loc[~merged["slide_pass"], ["slide_id", "status_for_gate", "candidates_after_mask", "qc_pass"]]
     if not failed.empty:
@@ -79,8 +125,8 @@ def main() -> int:
                 f"candidates={int(r['candidates_after_mask'])} qc_pass={int(r['qc_pass'])}"
             )
 
-    dataset_ok = n_pass >= int(args.dataset_pass_min)
-    digital_ok = n_digital_pass >= int(args.digital_pass_min)
+    dataset_ok = n_pass >= int(req_dataset)
+    digital_ok = n_digital_pass >= int(req_digital)
     if dataset_ok and digital_ok:
         print("\nRESULT: PASS")
         return 0

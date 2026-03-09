@@ -10,6 +10,7 @@ from typing import Any
 
 import pandas as pd
 import yaml
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -109,6 +110,15 @@ def run_precheck(slides: list[str], cfg: dict) -> bool:
     return ok
 
 
+def _is_slide_done_for_qc(slide_path: str, cfg: dict) -> bool:
+    sid = Path(slide_path).stem
+    out_dir = Path(cfg["paths"]["out_dir"])
+    extract_qc_pool_only = bool(cfg.get("scoring", {}).get("extract_qc_pool_only", False))
+    if extract_qc_pool_only:
+        return (out_dir / "qc_pool" / sid / "qc_meta.csv").exists()
+    return (out_dir / "coords" / sid / "selected_meta.csv").exists()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run patch-selection pilot pipeline.")
     parser.add_argument("--config", default="configs/pilot.yaml", help="Path to config yaml.")
@@ -129,6 +139,12 @@ def main():
         action="store_true",
         help="Validate mask coverage/readiness for selected slides and exit without extraction.",
     )
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Skip slides that already have stage outputs (default from config run.resume, fallback true).",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -141,9 +157,11 @@ def main():
     run_cfg = cfg.get("run", {})
     cfg_multi = bool(run_cfg.get("multi_worker_mode", False))
     cfg_workers = int(run_cfg.get("cpu_workers", 1))
+    cfg_resume = bool(run_cfg.get("resume", True))
     multi_worker_mode = bool(args.multi_worker_mode or cfg_multi)
     workers = int(args.workers) if args.workers is not None else int(cfg_workers)
     workers = max(1, workers)
+    resume = cfg_resume if args.resume is None else bool(args.resume)
 
     raw_wsi_dirs = _as_list(cfg["paths"].get("wsi_dir", "data/raw_wsi"))
     wsi_recursive = bool(cfg["paths"].get("wsi_recursive", True))
@@ -170,6 +188,7 @@ def main():
     print(f"WSI dirs: {[str(p) for p in wsi_dirs]}")
     print(f"WSI recursive scan: {wsi_recursive}")
     print(f"Multi-worker mode: {multi_worker_mode} (workers={workers})")
+    print(f"Resume mode: {resume}")
     print(f"Mask dir: {mask_dir}")
     print(f"Out dir:  {out_dir}")
     print(f"Slides ({len(slide_items)}):")
@@ -182,7 +201,9 @@ def main():
 
     all_ok = True
     center_jobs: list[tuple[str, list[str], dict]] = []
-    for center, center_slides in sorted(by_center.items()):
+    for center, center_slides in tqdm(
+        sorted(by_center.items()), desc="[qc] centers", unit="center", dynamic_ncols=True
+    ):
         center_mask_dir = mask_dir / center / "mask"
         center_out_dir = out_dir / center
         center_cfg = dict(cfg)
@@ -194,11 +215,23 @@ def main():
         if not precheck_ok:
             all_ok = False
             continue
-        center_jobs.append((center, center_slides, center_cfg))
+        if resume:
+            pending_slides = [sp for sp in center_slides if not _is_slide_done_for_qc(sp, center_cfg)]
+            skipped_done = len(center_slides) - len(pending_slides)
+            print(f"Resume scan: pending={len(pending_slides)} skipped_done={skipped_done}")
+        else:
+            pending_slides = list(center_slides)
+        if pending_slides:
+            center_jobs.append((center, pending_slides, center_cfg))
+        else:
+            print(f"No pending slides for center={center}; skipping extraction.")
 
     if not all_ok:
         raise SystemExit(1)
     if args.precheck_only:
+        return
+    if not center_jobs:
+        print("No pending slides across all centers. Nothing to run.")
         return
 
     if multi_worker_mode and workers > 1 and len(center_jobs) > 1:
@@ -218,12 +251,14 @@ def main():
                     print(f"Center failed: {center} ({type(e).__name__}: {e})")
                     raise
     else:
-        for center, center_slides, center_cfg in center_jobs:
+        for center, center_slides, center_cfg in tqdm(
+            center_jobs, desc="[qc] center runs", unit="center", dynamic_ncols=True
+        ):
             run_on_slides(center_slides, center_cfg)
 
     # Aggregate per-center QC summaries into a global summary for gate checks.
     agg_rows: list[pd.DataFrame] = []
-    for center in sorted(by_center.keys()):
+    for center in tqdm(sorted(by_center.keys()), desc="[qc] aggregate", unit="center", dynamic_ncols=True):
         center_summary = out_dir / center / "qc" / "run_summary.csv"
         if center_summary.exists():
             df = pd.read_csv(center_summary, dtype={"slide_id": "string"})

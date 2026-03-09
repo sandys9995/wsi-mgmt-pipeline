@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from tqdm import tqdm
 
 
 VALID_STAGES = ("mask", "qc", "gate", "tumor", "uni")
@@ -100,6 +101,11 @@ def main() -> None:
     if not cfg_path.exists():
         raise FileNotFoundError(f"Config not found: {cfg_path}")
     cfg = _load_cfg(cfg_path)
+    run_cfg = cfg.get("run", {})
+    strict_gate_cfg = bool(run_cfg.get("strict_gate", False))
+    continue_on_fail_cfg = bool(run_cfg.get("continue_on_fail", True))
+    strict_gate = bool(args.strict_gate or strict_gate_cfg)
+    continue_on_fail = bool(args.continue_on_fail or continue_on_fail_cfg)
 
     paths_cfg = cfg.get("paths", {})
     mask_summary = _resolve_path(project_root, paths_cfg.get("mask_dir", "data/masks")) / "mask_summary.csv"
@@ -122,14 +128,15 @@ def main() -> None:
         print(f"io_workers override: {args.io_workers}")
     if args.smoke_gate:
         print("smoke_gate: enabled (dataset-pass-min=1, digital-pass-min=0)")
-    print(f"strict_gate: {bool(args.strict_gate)}")
-    if args.continue_on_fail:
-        print("continue_on_fail: enabled")
+    print(f"strict_gate: {strict_gate}")
+    print(f"continue_on_fail: {continue_on_fail}")
 
     stage_codes: dict[str, int] = {}
     hard_fail_code = 0
 
-    for stage in stages:
+    stage_bar = tqdm(stages, desc="[e2e] stages", unit="stage", dynamic_ncols=True)
+    for stage in stage_bar:
+        stage_bar.set_postfix_str(stage)
         if stage == "mask":
             cmd = [python, "-u", "scripts/make_masks.py", "--config", str(cfg_path)]
             if args.n_slides is not None:
@@ -155,9 +162,17 @@ def main() -> None:
                 str(mask_summary),
                 "--run-summary",
                 str(qc_summary),
+                "--ok-statuses",
+                "ok,high_tissue",
             ]
-            if args.smoke_gate:
-                cmd += ["--dataset-pass-min", "1", "--digital-pass-min", "0"]
+            if strict_gate:
+                cmd += ["--mode", "strict"]
+                if args.smoke_gate:
+                    cmd += ["--dataset-pass-min", "1", "--digital-pass-min", "0"]
+            else:
+                cmd += ["--mode", "adaptive"]
+                if args.smoke_gate:
+                    cmd += ["--dataset-pass-rate", "0.20", "--digital-pass-rate", "0.0"]
         elif stage == "tumor":
             cmd = [python, "-u", "scripts/run_tumor_gate_pilot.py", "--config", str(cfg_path)]
             if args.n_slides is not None:
@@ -189,7 +204,7 @@ def main() -> None:
         if code == 0:
             continue
 
-        if stage == "gate" and (not args.strict_gate):
+        if stage == "gate" and (not strict_gate):
             print(
                 "[warn] gate failed but pipeline will continue "
                 "(non-blocking gate mode)."
@@ -200,7 +215,7 @@ def main() -> None:
             )
             continue
 
-        if args.continue_on_fail:
+        if continue_on_fail:
             if hard_fail_code == 0:
                 hard_fail_code = int(code)
             print(
