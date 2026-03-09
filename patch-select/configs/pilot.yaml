@@ -216,7 +216,7 @@ outputs:
   write_montage: true
   montage_n: 200
   write_qc_pool: true
-  write_qc_tiles_npy: true
+  write_qc_tiles_npy: false
 
 tumor_gate:
   # Stage-2 pilot: run Macenko + ResNet tumor scoring on selected_meta.csv outputs.
