@@ -89,6 +89,29 @@ def _resolve_slide_diag(slide_diag: dict) -> dict:
     }
 
 
+def _error_summary_row(base_row: dict, status: str, reason: str, error_type: str = "") -> dict:
+    row = dict(base_row)
+    row.update(
+        {
+            "candidates_after_mask": 0,
+            "qc_pass": 0,
+            "selected_count": 0,
+            "good_count": 0,
+            "typeA": 0,
+            "typeB": 0,
+            "typeC": 0,
+            "typeD": 0,
+            "mean_blood_score": np.nan,
+            "mean_rbc_frac": np.nan,
+            "median_cell_rich": np.nan,
+            "qc_status": status,
+            "qc_error_type": error_type,
+            "qc_error_message": reason,
+        }
+    )
+    return row
+
+
 def _infer_mask_level(mask: np.ndarray, wsi) -> int:
     mh, mw = mask.shape[:2]
     best_lvl = 0
@@ -165,7 +188,6 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
     for sp in tqdm(slide_paths, desc="[qc] slides", unit="slide", dynamic_ncols=True):
         sid = _stem(sp)
         print(f"\n=== {sid} ===")
-        wsi = open_wsi(sp)
         slide_diag = mask_diag.get(sid, {})
         resolved_diag = _resolve_slide_diag(slide_diag)
         slide_mask_status = str(resolved_diag["mask_status"])
@@ -192,304 +214,300 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
                 "profile_used": slide_profile_used,
             }
 
-        # load mask
-        mask_path = _find_mask(mask_dir, sp)
-        mask = load_mask(mask_path)
-
-        mask_level = _infer_mask_level(mask, wsi)
-        ds = float(wsi.level_downsamples[mask_level])
-
-        # adaptive stride in mask pixels
-        stride = max(4, int(round(stride0 / ds)))
-
-        # denser sampling for relatively fine mask levels (helps C3L-like cases)
-        if ds <= 16:
-            stride = max(4, stride // 2)
-
-        print(
-            f"Mask: {mask_path.name} shape={mask.shape} inferred_level={mask_level} "
-            f"ds={ds:.2f} -> stride_mask={stride} (stride_level0={stride0})"
-        )
-
-        # candidate grid in mask space
-        mh, mw = mask.shape[:2]
-        ys = np.arange(0, mh, stride, dtype=np.int32)
-        xs = np.arange(0, mw, stride, dtype=np.int32)
-        grid = np.array([(x, y) for y in ys for x in xs], dtype=np.int32)
-
-        keep = mask[grid[:, 1], grid[:, 0]] > 0
-        grid = grid[keep]
-
-        if len(grid) == 0:
-            print("No tissue candidates from mask. Skipping.")
-            row = _base_summary_row()
-            row.update(
-                {
-                    "candidates_after_mask": 0,
-                    "qc_pass": 0,
-                    "selected_count": 0,
-                    "good_count": 0,
-                    "typeA": 0,
-                    "typeB": 0,
-                    "typeC": 0,
-                    "typeD": 0,
-                    "mean_blood_score": np.nan,
-                    "mean_rbc_frac": np.nan,
-                    "median_cell_rich": np.nan,
-                }
-            )
-            run_summary_rows.append(row)
-            wsi.close()
+        if slide_mask_status_effective in {"read_error", "open_error", "mask_error"}:
+            msg = str(slide_diag.get("error_message", "")).strip() or "mask stage marked slide unreadable"
+            print(f"Skip slide due to mask-stage failure: {msg}")
+            run_summary_rows.append(_error_summary_row(_base_summary_row(), "skipped_mask_error", msg))
             continue
 
-        # subsample for speed
-        if len(grid) > max_candidates:
-            idx = rng.choice(len(grid), size=max_candidates, replace=False)
-            grid = grid[idx]
+        wsi = None
+        try:
+            wsi = open_wsi(sp)
+            mask_path = _find_mask(mask_dir, sp)
+            mask = load_mask(mask_path)
 
-        # map to level0 coords
-        xy0 = _mask_xy_to_level0_xy(grid, wsi, mask_level)
-        xy0 = _clip_level0_coords(xy0, wsi, read_size=read_size)
+            mask_level = _infer_mask_level(mask, wsi)
+            ds = float(wsi.level_downsamples[mask_level])
+            stride = max(4, int(round(stride0 / ds)))
+            if ds <= 16:
+                stride = max(4, stride // 2)
 
-        # read half-mag patches (448@0 -> 224)
-        tiles = np.zeros((len(xy0), out_size, out_size, 3), dtype=np.uint8)
-        for i, (x0, y0) in enumerate(
-            tqdm(xy0, desc=f"[qc] {sid} read", unit="patch", dynamic_ncols=True, leave=False)
-        ):
-            tiles[i] = wsi.read_half_mag_patch(
-                int(x0), int(y0), out_size=out_size, scale_factor=scale_factor
+            print(
+                f"Mask: {mask_path.name} shape={mask.shape} inferred_level={mask_level} "
+                f"ds={ds:.2f} -> stride_mask={stride} (stride_level0={stride0})"
             )
 
-        # QC
-        tf = tissue_fraction(tiles, cfg=cfg.get("qc", {}))
-        fs = focus_score(tiles)
-        bm = brightness_mean(tiles)
-        af = artifact_fraction(tiles)
-        rbcf = rbc_fraction(tiles, cfg=cfg.get("qc", {}))
+            mh, mw = mask.shape[:2]
+            ys = np.arange(0, mh, stride, dtype=np.int32)
+            xs = np.arange(0, mw, stride, dtype=np.int32)
+            grid = np.array([(x, y) for y in ys for x in xs], dtype=np.int32)
+            grid = grid[mask[grid[:, 1], grid[:, 0]] > 0]
 
-        qc_keep = (
-            (tf >= min_tissue)
-            & (fs >= min_focus)
-            & (bm >= min_brightness)
-            & (af <= max_artifact_frac)
-            & (rbcf <= max_rbc_frac)
-        )
-        if max_brightness is not None:
-            qc_keep &= (bm <= float(max_brightness))
+            if len(grid) == 0:
+                print("No tissue candidates from mask. Skipping.")
+                row = _base_summary_row()
+                row.update(
+                    {
+                        "candidates_after_mask": 0,
+                        "qc_pass": 0,
+                        "selected_count": 0,
+                        "good_count": 0,
+                        "typeA": 0,
+                        "typeB": 0,
+                        "typeC": 0,
+                        "typeD": 0,
+                        "mean_blood_score": np.nan,
+                        "mean_rbc_frac": np.nan,
+                        "median_cell_rich": np.nan,
+                    }
+                )
+                run_summary_rows.append(row)
+                continue
 
-        if bool(cfg["qc"]["reject_adipose"]):
-            ad = adipose_score(tiles)
-            qc_keep &= (ad < float(cfg["qc"]["adipose_whiteness"]))
-        else:
-            ad = np.full(len(tiles), np.nan, dtype=np.float32)
+            if len(grid) > max_candidates:
+                idx = rng.choice(len(grid), size=max_candidates, replace=False)
+                grid = grid[idx]
 
-        tiles_qc = tiles[qc_keep]
-        xy0_qc = xy0[qc_keep]
-        grid_qc = grid[qc_keep]
-        tf_qc = tf[qc_keep]
-        fs_qc = fs[qc_keep]
-        bm_qc = bm[qc_keep]
-        af_qc = af[qc_keep]
-        rbcf_qc = rbcf[qc_keep]
-        ad_qc = ad[qc_keep] if np.ndim(ad) else ad
+            xy0 = _mask_xy_to_level0_xy(grid, wsi, mask_level)
+            xy0 = _clip_level0_coords(xy0, wsi, read_size=read_size)
 
-        print(f"Candidates(after mask): {len(grid)}  QC-pass: {len(tiles_qc)}")
-        if len(tiles_qc) == 0:
-            print("No QC-passing candidates. Skipping.")
-            row = _base_summary_row()
-            row.update(
-                {
-                    "candidates_after_mask": int(len(grid)),
-                    "qc_pass": 0,
-                    "selected_count": 0,
-                    "good_count": 0,
-                    "typeA": 0,
-                    "typeB": 0,
-                    "typeC": 0,
-                    "typeD": 0,
-                    "mean_blood_score": np.nan,
-                    "mean_rbc_frac": np.nan,
-                    "median_cell_rich": np.nan,
-                }
+            tiles = np.zeros((len(xy0), out_size, out_size, 3), dtype=np.uint8)
+            for i, (x0, y0) in enumerate(
+                tqdm(xy0, desc=f"[qc] {sid} read", unit="patch", dynamic_ncols=True, leave=False)
+            ):
+                tiles[i] = wsi.read_half_mag_patch(int(x0), int(y0), out_size=out_size, scale_factor=scale_factor)
+
+            tf = tissue_fraction(tiles, cfg=cfg.get("qc", {}))
+            fs = focus_score(tiles)
+            bm = brightness_mean(tiles)
+            af = artifact_fraction(tiles)
+            rbcf = rbc_fraction(tiles, cfg=cfg.get("qc", {}))
+
+            qc_keep = (
+                (tf >= min_tissue)
+                & (fs >= min_focus)
+                & (bm >= min_brightness)
+                & (af <= max_artifact_frac)
+                & (rbcf <= max_rbc_frac)
             )
-            run_summary_rows.append(row)
-            wsi.close()
-            continue
+            if max_brightness is not None:
+                qc_keep &= bm <= float(max_brightness)
 
-        if bool(cfg["outputs"].get("write_qc_pool", False)):
-            slide_out_pool = qc_pool_root / sid
-            _ensure_dir(slide_out_pool)
-            qc_meta = pd.DataFrame(
-                {
-                    "x_mask": grid_qc[:, 0],
-                    "y_mask": grid_qc[:, 1],
-                    "x0": xy0_qc[:, 0],
-                    "y0": xy0_qc[:, 1],
-                    "tissue_frac": tf_qc,
-                    "focus": fs_qc,
-                    "brightness": bm_qc,
-                    "qc_artifact_frac": af_qc,
-                    "qc_rbc_frac": rbcf_qc,
-                    "adipose_proxy": ad_qc,
-                    "mask_status": slide_mask_status,
-                    "mask_status_global": slide_mask_status_global,
-                    "mask_status_effective": slide_mask_status_effective,
-                    "status_basis": slide_status_basis,
-                    "fallback_used": slide_fallback_used,
-                    "mask_frac": slide_mask_frac,
-                    "mask_frac_effective": slide_mask_frac_effective,
-                    "sparse_canvas_mode": slide_sparse_canvas_mode,
-                    "profile_used": slide_profile_used,
-                }
+            if bool(cfg["qc"]["reject_adipose"]):
+                ad = adipose_score(tiles)
+                qc_keep &= ad < float(cfg["qc"]["adipose_whiteness"])
+            else:
+                ad = np.full(len(tiles), np.nan, dtype=np.float32)
+
+            tiles_qc = tiles[qc_keep]
+            xy0_qc = xy0[qc_keep]
+            grid_qc = grid[qc_keep]
+            tf_qc = tf[qc_keep]
+            fs_qc = fs[qc_keep]
+            bm_qc = bm[qc_keep]
+            af_qc = af[qc_keep]
+            rbcf_qc = rbcf[qc_keep]
+            ad_qc = ad[qc_keep] if np.ndim(ad) else ad
+
+            print(f"Candidates(after mask): {len(grid)}  QC-pass: {len(tiles_qc)}")
+            if len(tiles_qc) == 0:
+                print("No QC-passing candidates. Skipping.")
+                row = _base_summary_row()
+                row.update(
+                    {
+                        "candidates_after_mask": int(len(grid)),
+                        "qc_pass": 0,
+                        "selected_count": 0,
+                        "good_count": 0,
+                        "typeA": 0,
+                        "typeB": 0,
+                        "typeC": 0,
+                        "typeD": 0,
+                        "mean_blood_score": np.nan,
+                        "mean_rbc_frac": np.nan,
+                        "median_cell_rich": np.nan,
+                    }
+                )
+                run_summary_rows.append(row)
+                continue
+
+            if bool(cfg["outputs"].get("write_qc_pool", False)):
+                slide_out_pool = qc_pool_root / sid
+                _ensure_dir(slide_out_pool)
+                qc_meta = pd.DataFrame(
+                    {
+                        "x_mask": grid_qc[:, 0],
+                        "y_mask": grid_qc[:, 1],
+                        "x0": xy0_qc[:, 0],
+                        "y0": xy0_qc[:, 1],
+                        "tissue_frac": tf_qc,
+                        "focus": fs_qc,
+                        "brightness": bm_qc,
+                        "qc_artifact_frac": af_qc,
+                        "qc_rbc_frac": rbcf_qc,
+                        "adipose_proxy": ad_qc,
+                        "mask_status": slide_mask_status,
+                        "mask_status_global": slide_mask_status_global,
+                        "mask_status_effective": slide_mask_status_effective,
+                        "status_basis": slide_status_basis,
+                        "fallback_used": slide_fallback_used,
+                        "mask_frac": slide_mask_frac,
+                        "mask_frac_effective": slide_mask_frac_effective,
+                        "sparse_canvas_mode": slide_sparse_canvas_mode,
+                        "profile_used": slide_profile_used,
+                    }
+                )
+                qc_meta.to_csv(slide_out_pool / "qc_meta.csv", index=False)
+                np.save(slide_out_pool / "qc_coords_level0.npy", xy0_qc.astype(np.int32))
+                np.save(slide_out_pool / "qc_coords_mask.npy", grid_qc.astype(np.int32))
+                if bool(cfg["outputs"].get("write_qc_tiles_npy", False)):
+                    np.save(slide_out_pool / "qc_tiles_uint8.npy", tiles_qc.astype(np.uint8))
+
+            if bool(cfg.get("scoring", {}).get("extract_qc_pool_only", False)):
+                print("QC-pool-only mode: skipping classical scoring/quota selection.")
+                row = _base_summary_row()
+                row.update(
+                    {
+                        "candidates_after_mask": int(len(grid)),
+                        "qc_pass": int(len(tiles_qc)),
+                        "selected_count": int(len(tiles_qc)),
+                        "good_count": np.nan,
+                        "typeA": np.nan,
+                        "typeB": np.nan,
+                        "typeC": np.nan,
+                        "typeD": np.nan,
+                        "mean_blood_score": np.nan,
+                        "mean_rbc_frac": float(np.mean(rbcf_qc)) if len(rbcf_qc) else np.nan,
+                        "median_cell_rich": np.nan,
+                    }
+                )
+                run_summary_rows.append(row)
+                continue
+
+            scores_df = compute_scores_and_types(tiles_qc, tf_qc, fs_qc, cfg)
+            scores_df["brightness"] = bm_qc
+            scores_df["qc_artifact_frac"] = af_qc
+            scores_df["qc_rbc_frac"] = rbcf_qc
+            scores_df["adipose_proxy"] = ad_qc
+            scores_df["x_mask"] = grid_qc[:, 0]
+            scores_df["y_mask"] = grid_qc[:, 1]
+            scores_df["x0"] = xy0_qc[:, 0]
+            scores_df["y0"] = xy0_qc[:, 1]
+            scores_df["mask_status"] = slide_mask_status
+            scores_df["mask_status_global"] = slide_mask_status_global
+            scores_df["mask_status_effective"] = slide_mask_status_effective
+            scores_df["status_basis"] = slide_status_basis
+            scores_df["fallback_used"] = slide_fallback_used
+            scores_df["mask_frac"] = slide_mask_frac
+            scores_df["mask_frac_effective"] = slide_mask_frac_effective
+            scores_df["sparse_canvas_mode"] = slide_sparse_canvas_mode
+            scores_df["profile_used"] = slide_profile_used
+
+            if bool(cfg["spatial"]["enable_spatial_cap"]):
+                sel_idx = apply_spatial_cap(
+                    xy_mask=grid_qc,
+                    scores_df=scores_df,
+                    cell_size=int(cfg["spatial"]["cell_size"]),
+                    max_per_cell=int(cfg["spatial"]["max_per_cell"]),
+                    sort_col="cell_rich_p",
+                )
+                tiles_cap = tiles_qc[sel_idx]
+                scores_cap = scores_df.iloc[sel_idx].reset_index(drop=True)
+            else:
+                tiles_cap = tiles_qc
+                scores_cap = scores_df
+
+            target = int(cfg["scoring"]["target_patches"])
+            sel_idx2 = quota_select(scores_cap, target, cfg)
+            tiles_sel = tiles_cap[sel_idx2]
+            meta_sel = scores_cap.iloc[sel_idx2].reset_index(drop=True)
+            selected_count = int(len(meta_sel))
+            good = int(meta_sel["type"].isin(["A", "B"]).sum())
+
+            if good < int(cfg["scoring"]["min_good_patches_reject"]):
+                print(f"REJECT slide: only {good} good patches (A+B).")
+                row = _base_summary_row()
+                row.update(
+                    {
+                        "candidates_after_mask": int(len(grid)),
+                        "qc_pass": int(len(tiles_qc)),
+                        "selected_count": selected_count,
+                        "good_count": good,
+                        "typeA": int((meta_sel["type"] == "A").sum()),
+                        "typeB": int((meta_sel["type"] == "B").sum()),
+                        "typeC": int((meta_sel["type"] == "C").sum()),
+                        "typeD": int((meta_sel["type"] == "D").sum()),
+                        "mean_blood_score": float(meta_sel["blood_score"].mean()) if selected_count else np.nan,
+                        "mean_rbc_frac": float(meta_sel["rbc_frac"].mean()) if selected_count else np.nan,
+                        "median_cell_rich": float(meta_sel["cell_rich_score"].median()) if selected_count else np.nan,
+                    }
+                )
+                run_summary_rows.append(row)
+                continue
+
+            if good < int(cfg["scoring"]["min_good_patches_flag"]):
+                print(f"FLAG slide: only {good} good patches (A+B). Keeping outputs.")
+
+            slide_out_coords = coords_root / sid
+            slide_out_qc = qc_root / sid
+            slide_out_patches = patches_lvl0_root / sid
+            _ensure_dir(slide_out_coords)
+            _ensure_dir(slide_out_qc)
+            _ensure_dir(slide_out_patches)
+
+            coords_np = meta_sel[["x0", "y0"]].to_numpy(dtype=np.int32)
+            meta_sel["selected_count"] = selected_count
+            meta_sel["good_count"] = good
+            np.save(slide_out_coords / "selected_coords_level0.npy", coords_np)
+            meta_sel.to_csv(slide_out_coords / "selected_meta.csv", index=False)
+
+            slide_summary = pd.DataFrame(
+                [
+                    {
+                        **_base_summary_row(),
+                        "candidates_after_mask": int(len(grid)),
+                        "qc_pass": int(len(tiles_qc)),
+                        "selected_count": selected_count,
+                        "good_count": good,
+                        "typeA": int((meta_sel["type"] == "A").sum()),
+                        "typeB": int((meta_sel["type"] == "B").sum()),
+                        "typeC": int((meta_sel["type"] == "C").sum()),
+                        "typeD": int((meta_sel["type"] == "D").sum()),
+                        "mean_blood_score": float(meta_sel["blood_score"].mean()) if selected_count else np.nan,
+                        "mean_rbc_frac": float(meta_sel["rbc_frac"].mean()) if selected_count else np.nan,
+                        "median_cell_rich": float(meta_sel["cell_rich_score"].median()) if selected_count else np.nan,
+                    },
+                ]
             )
-            qc_meta.to_csv(slide_out_pool / "qc_meta.csv", index=False)
-            np.save(slide_out_pool / "qc_coords_level0.npy", xy0_qc.astype(np.int32))
-            np.save(slide_out_pool / "qc_coords_mask.npy", grid_qc.astype(np.int32))
-            if bool(cfg["outputs"].get("write_qc_tiles_npy", False)):
-                np.save(slide_out_pool / "qc_tiles_uint8.npy", tiles_qc.astype(np.uint8))
+            slide_summary.to_csv(slide_out_qc / "summary.csv", index=False)
+            run_summary_rows.extend(slide_summary.to_dict(orient="records"))
 
-        # scoring + types
-        if bool(cfg.get("scoring", {}).get("extract_qc_pool_only", False)):
-            print("QC-pool-only mode: skipping classical scoring/quota selection.")
-            row = _base_summary_row()
-            row.update(
-                {
-                    "candidates_after_mask": int(len(grid)),
-                    "qc_pass": int(len(tiles_qc)),
-                    "selected_count": int(len(tiles_qc)),
-                    "good_count": np.nan,
-                    "typeA": np.nan,
-                    "typeB": np.nan,
-                    "typeC": np.nan,
-                    "typeD": np.nan,
-                    "mean_blood_score": np.nan,
-                    "mean_rbc_frac": float(np.mean(rbcf_qc)) if len(rbcf_qc) else np.nan,
-                    "median_cell_rich": np.nan,
-                }
-            )
-            run_summary_rows.append(row)
-            wsi.close()
-            continue
+            if bool(cfg["outputs"]["write_montage"]):
+                save_montage(
+                    tiles=tiles_sel,
+                    out_path=slide_out_qc / "montage.png",
+                    n=int(cfg["outputs"]["montage_n"]),
+                    seed=seed,
+                )
 
-        # scoring + types
-        scores_df = compute_scores_and_types(tiles_qc, tf_qc, fs_qc, cfg)
-        scores_df["brightness"] = bm_qc
-        scores_df["qc_artifact_frac"] = af_qc
-        scores_df["qc_rbc_frac"] = rbcf_qc
-        scores_df["adipose_proxy"] = ad_qc
-        scores_df["x_mask"] = grid_qc[:, 0]
-        scores_df["y_mask"] = grid_qc[:, 1]
-        scores_df["x0"] = xy0_qc[:, 0]
-        scores_df["y0"] = xy0_qc[:, 1]
-        scores_df["mask_status"] = slide_mask_status
-        scores_df["mask_status_global"] = slide_mask_status_global
-        scores_df["mask_status_effective"] = slide_mask_status_effective
-        scores_df["status_basis"] = slide_status_basis
-        scores_df["fallback_used"] = slide_fallback_used
-        scores_df["mask_frac"] = slide_mask_frac
-        scores_df["mask_frac_effective"] = slide_mask_frac_effective
-        scores_df["sparse_canvas_mode"] = slide_sparse_canvas_mode
-        scores_df["profile_used"] = slide_profile_used
+            if bool(cfg["outputs"]["write_patches"]):
+                from PIL import Image
 
-        # spatial cap (in mask space)
-        if bool(cfg["spatial"]["enable_spatial_cap"]):
-            sel_idx = apply_spatial_cap(
-                xy_mask=grid_qc,
-                scores_df=scores_df,
-                cell_size=int(cfg["spatial"]["cell_size"]),
-                max_per_cell=int(cfg["spatial"]["max_per_cell"]),
-                sort_col="cell_rich_p",
-            )
-            tiles_cap = tiles_qc[sel_idx]
-            scores_cap = scores_df.iloc[sel_idx].reset_index(drop=True)
-        else:
-            tiles_cap = tiles_qc
-            scores_cap = scores_df
+                for i in range(len(tiles_sel)):
+                    Image.fromarray(tiles_sel[i]).save(slide_out_patches / f"{i:05d}.png")
 
-        # quota selection
-        target = int(cfg["scoring"]["target_patches"])
-        sel_idx2 = quota_select(scores_cap, target, cfg)
-        tiles_sel = tiles_cap[sel_idx2]
-        meta_sel = scores_cap.iloc[sel_idx2].reset_index(drop=True)
-        selected_count = int(len(meta_sel))
-
-        # reject/flag based on good patches (A+B)
-        good = int(meta_sel["type"].isin(["A", "B"]).sum())
-        if good < int(cfg["scoring"]["min_good_patches_reject"]):
-            print(f"REJECT slide: only {good} good patches (A+B).")
-            row = _base_summary_row()
-            row.update(
-                {
-                    "candidates_after_mask": int(len(grid)),
-                    "qc_pass": int(len(tiles_qc)),
-                    "selected_count": selected_count,
-                    "good_count": good,
-                    "typeA": int((meta_sel["type"] == "A").sum()),
-                    "typeB": int((meta_sel["type"] == "B").sum()),
-                    "typeC": int((meta_sel["type"] == "C").sum()),
-                    "typeD": int((meta_sel["type"] == "D").sum()),
-                    "mean_blood_score": float(meta_sel["blood_score"].mean()) if selected_count else np.nan,
-                    "mean_rbc_frac": float(meta_sel["rbc_frac"].mean()) if selected_count else np.nan,
-                    "median_cell_rich": float(meta_sel["cell_rich_score"].median()) if selected_count else np.nan,
-                }
-            )
-            run_summary_rows.append(row)
-            wsi.close()
-            continue
-
-        if good < int(cfg["scoring"]["min_good_patches_flag"]):
-            print(f"FLAG slide: only {good} good patches (A+B). Keeping outputs.")
-
-        # save outputs
-        slide_out_coords = coords_root / sid
-        slide_out_qc = qc_root / sid
-        slide_out_patches = patches_lvl0_root / sid
-        _ensure_dir(slide_out_coords)
-        _ensure_dir(slide_out_qc)
-        _ensure_dir(slide_out_patches)
-
-        coords_np = meta_sel[["x0", "y0"]].to_numpy(dtype=np.int32)
-        meta_sel["selected_count"] = selected_count
-        meta_sel["good_count"] = good
-        np.save(slide_out_coords / "selected_coords_level0.npy", coords_np)
-        meta_sel.to_csv(slide_out_coords / "selected_meta.csv", index=False)
-
-        slide_summary = pd.DataFrame(
-            [
-                {
-                    **_base_summary_row(),
-                    "candidates_after_mask": int(len(grid)),
-                    "qc_pass": int(len(tiles_qc)),
-                    "selected_count": selected_count,
-                    "good_count": good,
-                    "typeA": int((meta_sel["type"] == "A").sum()),
-                    "typeB": int((meta_sel["type"] == "B").sum()),
-                    "typeC": int((meta_sel["type"] == "C").sum()),
-                    "typeD": int((meta_sel["type"] == "D").sum()),
-                    "mean_blood_score": float(meta_sel["blood_score"].mean()) if selected_count else np.nan,
-                    "mean_rbc_frac": float(meta_sel["rbc_frac"].mean()) if selected_count else np.nan,
-                    "median_cell_rich": float(meta_sel["cell_rich_score"].median()) if selected_count else np.nan,
-                },
-            ]
-        )
-        slide_summary.to_csv(slide_out_qc / "summary.csv", index=False)
-        run_summary_rows.extend(slide_summary.to_dict(orient="records"))
-
-        if bool(cfg["outputs"]["write_montage"]):
-            save_montage(
-                tiles=tiles_sel,
-                out_path=slide_out_qc / "montage.png",
-                n=int(cfg["outputs"]["montage_n"]),
-                seed=seed,
-            )
-
-        if bool(cfg["outputs"]["write_patches"]):
-            from PIL import Image
-            for i in range(len(tiles_sel)):
-                Image.fromarray(tiles_sel[i]).save(slide_out_patches / f"{i:05d}.png")
-
-        print(f"Saved -> {slide_out_coords}")
-        wsi.close()
+            print(f"Saved -> {slide_out_coords}")
+        except Exception as e:
+            err_type = type(e).__name__
+            err_msg = " ".join(str(e).split())[:500]
+            print(f"[qc] {sid}: fail({err_type}: {err_msg})")
+            run_summary_rows.append(_error_summary_row(_base_summary_row(), "failed_exception", err_msg, err_type))
+        finally:
+            if wsi is not None:
+                try:
+                    wsi.close()
+                except Exception:
+                    pass
 
     if run_summary_rows:
         run_summary_path = qc_root / "run_summary.csv"

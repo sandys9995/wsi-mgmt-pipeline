@@ -603,237 +603,266 @@ def main():
             continue
 
         print(f"[mask] {stem}")
-        slide = openslide.OpenSlide(str(p))
-        target_ds = float(mask_cfg.get("target_ds", 64.0))
-        img, lvl, ds = read_thumb_rgb(slide, target_ds=target_ds)
-        black_canvas_frac_diag = float(_black_canvas_mask(img, mask_cfg).mean())
-        bbox_frac_diag = float(non_black_bbox_fraction(img, cfg=mask_cfg))
-
+        slide = None
+        img = None
+        lvl = np.nan
+        ds = np.nan
+        black_canvas_frac_diag = np.nan
+        bbox_frac_diag = np.nan
+        white_leak_frac_est = np.nan
+        stain_diag = {
+            "stain_vector_source": "",
+            "stain_estimation_reason": "",
+            "stain_estimation_pixels": 0,
+            "stain_estimation_valid_frac": np.nan,
+            "stain_estimation_pair_score": np.nan,
+            "stain_estimation_he_dot": np.nan,
+        }
         slide_cfg = dict(mask_cfg)
         profile_used = str(slide_cfg.get("profile", ""))
         sparse_canvas_mode = bool(slide_cfg.get("sparse_canvas_mode", False))
-        if strategy == "auto_hybrid":
-            sparse_canvas_mode = infer_sparse_canvas_mode(
-                slide_suffix=p.suffix,
-                black_canvas_frac=black_canvas_frac_diag,
-                non_black_bbox_frac=bbox_frac_diag,
-                cfg=mask_cfg,
-            )
-            if sparse_canvas_mode:
-                sparse_profile = str(mask_cfg.get("sparse_canvas_profile", "sparse_canvas_pure_v1")).strip()
-                slide_cfg = _apply_mask_profile(dict(mask_cfg), profile_override=sparse_profile, quiet=True)
-                profile_used = sparse_profile
-            else:
-                slide_cfg = dict(mask_cfg)
-                profile_used = str(slide_cfg.get("profile", ""))
+        error_row = None
 
-        slide_cfg["sparse_canvas_mode"] = bool(sparse_canvas_mode)
+        try:
+            slide = openslide.OpenSlide(str(p))
+            target_ds = float(mask_cfg.get("target_ds", 64.0))
+            img, lvl, ds = read_thumb_rgb(slide, target_ds=target_ds)
+            black_canvas_frac_diag = float(_black_canvas_mask(img, mask_cfg).mean())
+            bbox_frac_diag = float(non_black_bbox_fraction(img, cfg=mask_cfg))
 
-        final_target_ds = float(slide_cfg.get("target_ds", target_ds))
-        if abs(final_target_ds - ds) > 1e-3:
-            img, lvl, ds = read_thumb_rgb(slide, target_ds=final_target_ds)
-            black_canvas_frac_diag = float(_black_canvas_mask(img, slide_cfg).mean())
-            bbox_frac_diag = float(non_black_bbox_fraction(img, cfg=slide_cfg))
-
-        stain_diag = resolve_stain_vectors(img, cfg=slide_cfg)
-        slide_cfg["stain_vector_h"] = np.asarray(stain_diag["stain_vector_h"], dtype=np.float32)
-        slide_cfg["stain_vector_e"] = np.asarray(stain_diag["stain_vector_e"], dtype=np.float32)
-        slide_cfg["stain_vector_r"] = np.asarray(stain_diag["stain_vector_r"], dtype=np.float32)
-        stain_h = _vec_triplet(slide_cfg["stain_vector_h"])
-        stain_e = _vec_triplet(slide_cfg["stain_vector_e"])
-        stain_r = _vec_triplet(slide_cfg["stain_vector_r"])
-
-        print(
-            f"  thumb level={lvl} ds={ds:.1f} size={img.shape[1]}x{img.shape[0]} "
-            f"profile={profile_used or 'none'} sparse_canvas={sparse_canvas_mode} "
-            f"stain={stain_diag['stain_vector_source']} ({stain_diag['stain_estimation_reason']})"
-        )
-        mask, stats, _ = select_mask_with_fallback(img_rgb=img, cfg=slide_cfg)
-
-        retry_used = False
-        retry_mode = "none"
-        retry_ds = np.nan
-        retry_gain = 0.0
-        retry_added_px = 0
-        retry_added_nonwhite_frac = np.nan
-        retry_bbox_x = np.nan
-        retry_bbox_y = np.nan
-        retry_bbox_w = np.nan
-        retry_bbox_h = np.nan
-        status_for_retry = str(stats.get("mask_status_effective", stats.get("mask_status", "")))
-        if bool(slide_cfg.get("low_tissue_retry_enabled", True)) and status_for_retry == "low_tissue":
-            black_frac = float(stats.get("black_canvas_frac", 0.0))
-            low_frac_key = "mask_frac_effective" if bool(slide_cfg.get("sparse_canvas_mode", False)) else "mask_frac"
-            low_frac = float(stats.get(low_frac_key, stats.get("mask_frac", 0.0)))
-            min_black = float(slide_cfg.get("low_tissue_retry_min_black_frac", 0.70))
-            max_low = float(
-                slide_cfg.get(
-                    "low_tissue_retry_max_low_frac_effective"
-                    if bool(slide_cfg.get("sparse_canvas_mode", False))
-                    else "low_tissue_retry_max_low_frac",
-                    0.08,
+            slide_cfg = dict(mask_cfg)
+            profile_used = str(slide_cfg.get("profile", ""))
+            sparse_canvas_mode = bool(slide_cfg.get("sparse_canvas_mode", False))
+            if strategy == "auto_hybrid":
+                sparse_canvas_mode = infer_sparse_canvas_mode(
+                    slide_suffix=p.suffix,
+                    black_canvas_frac=black_canvas_frac_diag,
+                    non_black_bbox_frac=bbox_frac_diag,
+                    cfg=mask_cfg,
                 )
-            )
-            want_retry = bool((black_frac >= min_black) or (low_frac <= max_low))
-            if want_retry:
-                bbox = _non_black_bbox(img, slide_cfg)
-                if bbox is not None:
-                    x1, y1, x2, y2 = _expand_bbox(
-                        *bbox,
-                        width=int(img.shape[1]),
-                        height=int(img.shape[0]),
-                        expand_px=int(slide_cfg.get("roi_expand_px", 24)),
-                        expand_frac=float(slide_cfg.get("roi_expand_frac", 0.08)),
-                    )
-                    retry_bbox_x = int(x1)
-                    retry_bbox_y = int(y1)
-                    retry_bbox_w = int(x2 - x1)
-                    retry_bbox_h = int(y2 - y1)
-
-                    # Map coarse ROI bounds to level-0 for targeted finer read.
-                    x0_l0 = int(round(x1 * ds))
-                    y0_l0 = int(round(y1 * ds))
-                    w0_l0 = int(max(1, round((x2 - x1) * ds)))
-                    h0_l0 = int(max(1, round((y2 - y1) * ds)))
-                    want_ds = float(slide_cfg.get("low_tissue_retry_ds", 32.0))
-                    if want_ds < ds:
-                        roi_img, roi_lvl, roi_ds = read_region_rgb_at_ds(
-                            slide=slide,
-                            x0_l0=x0_l0,
-                            y0_l0=y0_l0,
-                            w_l0=w0_l0,
-                            h_l0=h0_l0,
-                            target_ds=want_ds,
-                        )
-                        retry_ds = float(roi_ds)
-                        roi_cfg = dict(slide_cfg)
-                        roi_cfg.update(
-                            {
-                                "min_component_area_ratio": float(slide_cfg.get("roi_min_component_area_ratio", 0.0002)),
-                                "open_kernel": min(5, int(slide_cfg.get("open_kernel", 5))),
-                                "close_kernel": max(7, int(slide_cfg.get("close_kernel", 11))),
-                            }
-                        )
-                        roi_mask, _, _ = select_mask_with_fallback(img_rgb=roi_img, cfg=roi_cfg)
-                        roi_mask_coarse = cv2.resize(
-                            roi_mask.astype(np.uint8),
-                            (int(x2 - x1), int(y2 - y1)),
-                            interpolation=cv2.INTER_NEAREST,
-                        )
-
-                        merged = mask.copy().astype(np.uint8)
-                        prev = merged[y1:y2, x1:x2]
-                        merged[y1:y2, x1:x2] = np.maximum(prev, roi_mask_coarse)
-                        old_frac = float(mask.mean())
-                        new_frac = float(merged.mean())
-                        retry_gain = max(0.0, new_frac - old_frac)
-
-                        added = (merged > 0) & (mask == 0)
-                        retry_added_px = int(added.sum())
-                        if int(added.sum()) > 0:
-                            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-                            hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-                            nonwhite = (gray < 242) | (hsv[:, :, 1] > 18)
-                            retry_added_nonwhite_frac = float((added & nonwhite).sum() / added.sum())
-                        else:
-                            retry_added_nonwhite_frac = 1.0
-
-                        old_white_leak = estimate_white_leak_fraction(img, mask, cfg=slide_cfg)
-                        new_white_leak = estimate_white_leak_fraction(img, merged, cfg=slide_cfg)
-                        retry_white_leak_delta = float(new_white_leak - old_white_leak)
-                        status_fields = compute_mask_status_fields(img_rgb=img, mask=merged.astype(np.uint8), cfg=slide_cfg)
-                        new_status_effective = str(status_fields.get("mask_status_effective", "unknown"))
-                        accept = retry_acceptance(
-                            retry_gain=retry_gain,
-                            retry_added_px=retry_added_px,
-                            retry_added_nonwhite_frac=retry_added_nonwhite_frac,
-                            retry_white_leak_delta=retry_white_leak_delta,
-                            new_status_effective=new_status_effective,
-                            cfg=slide_cfg,
-                        )
-                        if accept:
-                            mask = merged.astype(np.uint8)
-                            retry_used = True
-                            retry_mode = "roi_ds"
-                            stats = dict(stats)
-                            stats.update(status_fields)
-                            stats["low_tissue_retry_gain"] = retry_gain
-                            stats["low_tissue_retry_added_nonwhite_frac"] = retry_added_nonwhite_frac
-                            stats["low_tissue_retry_white_leak_delta"] = retry_white_leak_delta
-                            print(
-                                f"  low-tissue ROI retry accepted: roi_level={roi_lvl} ds={roi_ds:.1f} "
-                                f"gain={retry_gain*100:.2f}pp added_px={retry_added_px} "
-                                f"tissue%={new_frac*100:.2f} status={new_status_effective}"
-                            )
-                        else:
-                            print(
-                                f"  low-tissue ROI retry rejected: roi_level={roi_lvl} ds={roi_ds:.1f} "
-                                f"gain={retry_gain*100:.2f}pp added_px={retry_added_px} "
-                                f"nonwhite={retry_added_nonwhite_frac:.3f} leak_delta={retry_white_leak_delta:.3f}"
-                            )
-
-        soft_relax_used = False
-        soft_relax_gain = 0.0
-        soft_relax_added_nonwhite_frac = np.nan
-        soft_relax_white_leak = np.nan
-        if bool(slide_cfg.get("soft_relax_retry_enabled", True)):
-            cur_frac = float(mask.mean())
-            cur_pale = float(stats.get("pale_void_frac", 0.0))
-            if (cur_frac <= float(slide_cfg.get("soft_relax_max_mask_frac", 0.32))) and (
-                cur_pale >= float(slide_cfg.get("soft_relax_min_pale_void_frac", 0.40))
-            ):
-                relax_cfg = dict(slide_cfg)
-                relax_cfg.update(
-                    {
-                        "soft_rescue_touch_min": 0.0,
-                        "soft_rescue_min_component_area_ratio": 0.00005,
-                        "soft_rescue_white_like_max": 0.72,
-                        "soft_rescue_sat_min": 8,
-                    }
-                )
-                relax_mask, relax_stats, _ = select_mask_with_fallback(img_rgb=img, cfg=relax_cfg)
-                old = mask.astype(np.uint8)
-                new = relax_mask.astype(np.uint8)
-                gain = float(new.mean() - old.mean())
-                added = (new > 0) & (old == 0)
-                gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-                hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-                nonwhite = (gray < 242) | (hsv[:, :, 1] > 18)
-                white_hole = (gray >= 228) & (hsv[:, :, 1] <= 24)
-                added_nonwhite = float((added & nonwhite).sum() / max(1, added.sum()))
-                old_white_leak = float((old.astype(bool) & white_hole).sum() / max(1, old.sum()))
-                new_white_leak = float((new.astype(bool) & white_hole).sum() / max(1, new.sum()))
-                leak_delta = new_white_leak - old_white_leak
-
-                soft_relax_gain = gain
-                soft_relax_added_nonwhite_frac = added_nonwhite
-                soft_relax_white_leak = new_white_leak
-
-                min_gain = float(slide_cfg.get("soft_relax_min_gain", 0.0035))
-                min_nonwhite = float(slide_cfg.get("soft_relax_min_added_nonwhite_frac", 0.80))
-                max_leak_inc = float(slide_cfg.get("soft_relax_max_white_leak_increase", 0.02))
-                if (gain >= min_gain) and (added_nonwhite >= min_nonwhite) and (leak_delta <= max_leak_inc):
-                    mask = new
-                    stats = dict(relax_stats)
-                    stats.update(compute_mask_status_fields(img_rgb=img, mask=mask.astype(np.uint8), cfg=slide_cfg))
-                    soft_relax_used = True
-                    print(
-                        f"  soft-relax retry accepted: gain={gain*100:.2f}pp "
-                        f"added_nonwhite={added_nonwhite:.3f} white_leak={new_white_leak:.3f}"
-                    )
+                if sparse_canvas_mode:
+                    sparse_profile = str(mask_cfg.get("sparse_canvas_profile", "sparse_canvas_pure_v1")).strip()
+                    slide_cfg = _apply_mask_profile(dict(mask_cfg), profile_override=sparse_profile, quiet=True)
+                    profile_used = sparse_profile
                 else:
-                    print(
-                        f"  soft-relax retry rejected: gain={gain*100:.2f}pp "
-                        f"added_nonwhite={added_nonwhite:.3f} white_leak_delta={leak_delta:.3f}"
-                    )
-        stats = dict(stats)
-        stats.update(compute_mask_status_fields(img_rgb=img, mask=mask.astype(np.uint8), cfg=slide_cfg))
-        white_leak_frac_est = estimate_white_leak_fraction(img, mask, cfg=slide_cfg)
-        slide.close()
+                    slide_cfg = dict(mask_cfg)
+                    profile_used = str(slide_cfg.get("profile", ""))
 
-        np.save(out_npy, mask.astype(np.uint8))
-        save_preview(img, mask, out_png)
-        row = {
+            slide_cfg["sparse_canvas_mode"] = bool(sparse_canvas_mode)
+
+            final_target_ds = float(slide_cfg.get("target_ds", target_ds))
+            if abs(final_target_ds - ds) > 1e-3:
+                img, lvl, ds = read_thumb_rgb(slide, target_ds=final_target_ds)
+                black_canvas_frac_diag = float(_black_canvas_mask(img, slide_cfg).mean())
+                bbox_frac_diag = float(non_black_bbox_fraction(img, cfg=slide_cfg))
+
+            stain_diag = resolve_stain_vectors(img, cfg=slide_cfg)
+            slide_cfg["stain_vector_h"] = np.asarray(stain_diag["stain_vector_h"], dtype=np.float32)
+            slide_cfg["stain_vector_e"] = np.asarray(stain_diag["stain_vector_e"], dtype=np.float32)
+            slide_cfg["stain_vector_r"] = np.asarray(stain_diag["stain_vector_r"], dtype=np.float32)
+            stain_h = _vec_triplet(slide_cfg["stain_vector_h"])
+            stain_e = _vec_triplet(slide_cfg["stain_vector_e"])
+            stain_r = _vec_triplet(slide_cfg["stain_vector_r"])
+
+            print(
+                f"  thumb level={lvl} ds={ds:.1f} size={img.shape[1]}x{img.shape[0]} "
+                f"profile={profile_used or 'none'} sparse_canvas={sparse_canvas_mode} "
+                f"stain={stain_diag['stain_vector_source']} ({stain_diag['stain_estimation_reason']})"
+            )
+            mask, stats, _ = select_mask_with_fallback(img_rgb=img, cfg=slide_cfg)
+
+            retry_used = False
+            retry_mode = "none"
+            retry_ds = np.nan
+            retry_gain = 0.0
+            retry_added_px = 0
+            retry_added_nonwhite_frac = np.nan
+            retry_bbox_x = np.nan
+            retry_bbox_y = np.nan
+            retry_bbox_w = np.nan
+            retry_bbox_h = np.nan
+            status_for_retry = str(stats.get("mask_status_effective", stats.get("mask_status", "")))
+            if bool(slide_cfg.get("low_tissue_retry_enabled", True)) and status_for_retry == "low_tissue":
+                black_frac = float(stats.get("black_canvas_frac", 0.0))
+                low_frac_key = "mask_frac_effective" if bool(slide_cfg.get("sparse_canvas_mode", False)) else "mask_frac"
+                low_frac = float(stats.get(low_frac_key, stats.get("mask_frac", 0.0)))
+                min_black = float(slide_cfg.get("low_tissue_retry_min_black_frac", 0.70))
+                max_low = float(
+                    slide_cfg.get(
+                        "low_tissue_retry_max_low_frac_effective"
+                        if bool(slide_cfg.get("sparse_canvas_mode", False))
+                        else "low_tissue_retry_max_low_frac",
+                        0.08,
+                    )
+                )
+                want_retry = bool((black_frac >= min_black) or (low_frac <= max_low))
+                if want_retry:
+                    bbox = _non_black_bbox(img, slide_cfg)
+                    if bbox is not None:
+                        x1, y1, x2, y2 = _expand_bbox(
+                            *bbox,
+                            width=int(img.shape[1]),
+                            height=int(img.shape[0]),
+                            expand_px=int(slide_cfg.get("roi_expand_px", 24)),
+                            expand_frac=float(slide_cfg.get("roi_expand_frac", 0.08)),
+                        )
+                        retry_bbox_x = int(x1)
+                        retry_bbox_y = int(y1)
+                        retry_bbox_w = int(x2 - x1)
+                        retry_bbox_h = int(y2 - y1)
+
+                        x0_l0 = int(round(x1 * ds))
+                        y0_l0 = int(round(y1 * ds))
+                        w0_l0 = int(max(1, round((x2 - x1) * ds)))
+                        h0_l0 = int(max(1, round((y2 - y1) * ds)))
+                        want_ds = float(slide_cfg.get("low_tissue_retry_ds", 32.0))
+                        if want_ds < ds:
+                            roi_img, roi_lvl, roi_ds = read_region_rgb_at_ds(
+                                slide=slide,
+                                x0_l0=x0_l0,
+                                y0_l0=y0_l0,
+                                w_l0=w0_l0,
+                                h_l0=h0_l0,
+                                target_ds=want_ds,
+                            )
+                            retry_ds = float(roi_ds)
+                            roi_cfg = dict(slide_cfg)
+                            roi_cfg.update(
+                                {
+                                    "min_component_area_ratio": float(slide_cfg.get("roi_min_component_area_ratio", 0.0002)),
+                                    "open_kernel": min(5, int(slide_cfg.get("open_kernel", 5))),
+                                    "close_kernel": max(7, int(slide_cfg.get("close_kernel", 11))),
+                                }
+                            )
+                            roi_mask, _, _ = select_mask_with_fallback(img_rgb=roi_img, cfg=roi_cfg)
+                            roi_mask_coarse = cv2.resize(
+                                roi_mask.astype(np.uint8),
+                                (int(x2 - x1), int(y2 - y1)),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
+
+                            merged = mask.copy().astype(np.uint8)
+                            prev = merged[y1:y2, x1:x2]
+                            merged[y1:y2, x1:x2] = np.maximum(prev, roi_mask_coarse)
+                            old_frac = float(mask.mean())
+                            new_frac = float(merged.mean())
+                            retry_gain = max(0.0, new_frac - old_frac)
+
+                            added = (merged > 0) & (mask == 0)
+                            retry_added_px = int(added.sum())
+                            if int(added.sum()) > 0:
+                                gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                                hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+                                nonwhite = (gray < 242) | (hsv[:, :, 1] > 18)
+                                retry_added_nonwhite_frac = float((added & nonwhite).sum() / added.sum())
+                            else:
+                                retry_added_nonwhite_frac = 1.0
+
+                            old_white_leak = estimate_white_leak_fraction(img, mask, cfg=slide_cfg)
+                            new_white_leak = estimate_white_leak_fraction(img, merged, cfg=slide_cfg)
+                            retry_white_leak_delta = float(new_white_leak - old_white_leak)
+                            status_fields = compute_mask_status_fields(
+                                img_rgb=img,
+                                mask=merged.astype(np.uint8),
+                                cfg=slide_cfg,
+                            )
+                            new_status_effective = str(status_fields.get("mask_status_effective", "unknown"))
+                            accept = retry_acceptance(
+                                retry_gain=retry_gain,
+                                retry_added_px=retry_added_px,
+                                retry_added_nonwhite_frac=retry_added_nonwhite_frac,
+                                retry_white_leak_delta=retry_white_leak_delta,
+                                new_status_effective=new_status_effective,
+                                cfg=slide_cfg,
+                            )
+                            if accept:
+                                mask = merged.astype(np.uint8)
+                                retry_used = True
+                                retry_mode = "roi_ds"
+                                stats = dict(stats)
+                                stats.update(status_fields)
+                                stats["low_tissue_retry_gain"] = retry_gain
+                                stats["low_tissue_retry_added_nonwhite_frac"] = retry_added_nonwhite_frac
+                                stats["low_tissue_retry_white_leak_delta"] = retry_white_leak_delta
+                                print(
+                                    f"  low-tissue ROI retry accepted: roi_level={roi_lvl} ds={roi_ds:.1f} "
+                                    f"gain={retry_gain*100:.2f}pp added_px={retry_added_px} "
+                                    f"tissue%={new_frac*100:.2f} status={new_status_effective}"
+                                )
+                            else:
+                                print(
+                                    f"  low-tissue ROI retry rejected: roi_level={roi_lvl} ds={roi_ds:.1f} "
+                                    f"gain={retry_gain*100:.2f}pp added_px={retry_added_px} "
+                                    f"nonwhite={retry_added_nonwhite_frac:.3f} leak_delta={retry_white_leak_delta:.3f}"
+                                )
+
+            soft_relax_used = False
+            soft_relax_gain = 0.0
+            soft_relax_added_nonwhite_frac = np.nan
+            soft_relax_white_leak = np.nan
+            if bool(slide_cfg.get("soft_relax_retry_enabled", True)):
+                cur_frac = float(mask.mean())
+                cur_pale = float(stats.get("pale_void_frac", 0.0))
+                if (cur_frac <= float(slide_cfg.get("soft_relax_max_mask_frac", 0.32))) and (
+                    cur_pale >= float(slide_cfg.get("soft_relax_min_pale_void_frac", 0.40))
+                ):
+                    relax_cfg = dict(slide_cfg)
+                    relax_cfg.update(
+                        {
+                            "soft_rescue_touch_min": 0.0,
+                            "soft_rescue_min_component_area_ratio": 0.00005,
+                            "soft_rescue_white_like_max": 0.72,
+                            "soft_rescue_sat_min": 8,
+                        }
+                    )
+                    relax_mask, relax_stats, _ = select_mask_with_fallback(img_rgb=img, cfg=relax_cfg)
+                    old = mask.astype(np.uint8)
+                    new = relax_mask.astype(np.uint8)
+                    gain = float(new.mean() - old.mean())
+                    added = (new > 0) & (old == 0)
+                    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                    hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+                    nonwhite = (gray < 242) | (hsv[:, :, 1] > 18)
+                    white_hole = (gray >= 228) & (hsv[:, :, 1] <= 24)
+                    added_nonwhite = float((added & nonwhite).sum() / max(1, added.sum()))
+                    old_white_leak = float((old.astype(bool) & white_hole).sum() / max(1, old.sum()))
+                    new_white_leak = float((new.astype(bool) & white_hole).sum() / max(1, new.sum()))
+                    leak_delta = new_white_leak - old_white_leak
+
+                    soft_relax_gain = gain
+                    soft_relax_added_nonwhite_frac = added_nonwhite
+                    soft_relax_white_leak = new_white_leak
+
+                    min_gain = float(slide_cfg.get("soft_relax_min_gain", 0.0035))
+                    min_nonwhite = float(slide_cfg.get("soft_relax_min_added_nonwhite_frac", 0.80))
+                    max_leak_inc = float(slide_cfg.get("soft_relax_max_white_leak_increase", 0.02))
+                    if (gain >= min_gain) and (added_nonwhite >= min_nonwhite) and (leak_delta <= max_leak_inc):
+                        mask = new
+                        stats = dict(relax_stats)
+                        stats.update(
+                            compute_mask_status_fields(
+                                img_rgb=img,
+                                mask=mask.astype(np.uint8),
+                                cfg=slide_cfg,
+                            )
+                        )
+                        soft_relax_used = True
+                        print(
+                            f"  soft-relax retry accepted: gain={gain*100:.2f}pp "
+                            f"added_nonwhite={added_nonwhite:.3f} white_leak={new_white_leak:.3f}"
+                        )
+                    else:
+                        print(
+                            f"  soft-relax retry rejected: gain={gain*100:.2f}pp "
+                            f"added_nonwhite={added_nonwhite:.3f} white_leak_delta={leak_delta:.3f}"
+                        )
+            stats = dict(stats)
+            stats.update(compute_mask_status_fields(img_rgb=img, mask=mask.astype(np.uint8), cfg=slide_cfg))
+            white_leak_frac_est = estimate_white_leak_fraction(img, mask, cfg=slide_cfg)
+
+            np.save(out_npy, mask.astype(np.uint8))
+            save_preview(img, mask, out_png)
+            row = {
                 "slide_id": stem,
                 "center": str(center),
                 "thumb_level": int(lvl),
@@ -906,15 +935,75 @@ def main():
                 "bg_white_frac": float(stats.get("bg_white_frac", np.nan)),
                 "valid_stats_frac": float(stats.get("valid_stats_frac", np.nan)),
                 "blood_like_frac": float(stats["blood_like_frac"]),
+                "error_type": "",
+                "error_message": "",
             }
-        summary_rows.append(row)
-        by_center_rows.setdefault(str(center), []).append(row)
+            summary_rows.append(row)
+            by_center_rows.setdefault(str(center), []).append(row)
 
-        print(
-            f"  saved: {out_npy.name}  (shape={mask.shape}, tissue%={mask.mean()*100:.2f}, "
-            f"status={stats['mask_status']} eff={stats.get('mask_status_effective', stats['mask_status'])}, "
-            f"fallback={stats['fallback_used']})"
-        )
+            print(
+                f"  saved: {out_npy.name}  (shape={mask.shape}, tissue%={mask.mean()*100:.2f}, "
+                f"status={stats['mask_status']} eff={stats.get('mask_status_effective', stats['mask_status'])}, "
+                f"fallback={stats['fallback_used']})"
+            )
+        except Exception as e:
+            err_type = type(e).__name__
+            err_msg = " ".join(str(e).split())[:500]
+            error_status = "read_error" if isinstance(e, openslide.OpenSlideError) else "mask_error"
+            print(f"  [error] {stem}: {err_type}: {err_msg}")
+            error_row = {
+                "slide_id": stem,
+                "center": str(center),
+                "thumb_level": int(lvl) if np.isfinite(lvl) else np.nan,
+                "thumb_downsample": float(ds) if np.isfinite(ds) else np.nan,
+                "thumb_width": int(img.shape[1]) if isinstance(img, np.ndarray) else np.nan,
+                "thumb_height": int(img.shape[0]) if isinstance(img, np.ndarray) else np.nan,
+                "low_tissue_retry_used": False,
+                "low_tissue_retry_mode": "none",
+                "low_tissue_retry_downsample": np.nan,
+                "low_tissue_retry_gain": 0.0,
+                "low_tissue_retry_added_px": 0,
+                "low_tissue_retry_added_nonwhite_frac": np.nan,
+                "low_tissue_retry_bbox_x": np.nan,
+                "low_tissue_retry_bbox_y": np.nan,
+                "low_tissue_retry_bbox_w": np.nan,
+                "low_tissue_retry_bbox_h": np.nan,
+                "soft_relax_retry_used": False,
+                "soft_relax_retry_gain": 0.0,
+                "soft_relax_retry_added_nonwhite_frac": np.nan,
+                "soft_relax_retry_white_leak": np.nan,
+                "sparse_canvas_mode": bool(sparse_canvas_mode),
+                "profile_used": str(profile_used),
+                "non_black_bbox_frac": float(bbox_frac_diag) if np.isfinite(bbox_frac_diag) else np.nan,
+                "white_leak_frac_est": np.nan,
+                "mask_frac": np.nan,
+                "mask_frac_effective": np.nan,
+                "fallback_used": False,
+                "fallback_attempted": False,
+                "mask_status": error_status,
+                "mask_status_effective": error_status,
+                "status_basis": "error",
+                "stain_vector_source": str(stain_diag.get("stain_vector_source", "")),
+                "stain_estimation_reason": str(stain_diag.get("stain_estimation_reason", "")),
+                "stain_estimation_pixels": int(stain_diag.get("stain_estimation_pixels", 0)),
+                "stain_estimation_valid_frac": float(stain_diag.get("stain_estimation_valid_frac", np.nan)),
+                "stain_estimation_pair_score": float(stain_diag.get("stain_estimation_pair_score", np.nan)),
+                "stain_estimation_he_dot": float(stain_diag.get("stain_estimation_he_dot", np.nan)),
+                "black_canvas_frac": float(black_canvas_frac_diag) if np.isfinite(black_canvas_frac_diag) else np.nan,
+                "bg_white_frac": np.nan,
+                "valid_stats_frac": np.nan,
+                "blood_like_frac": np.nan,
+                "error_type": err_type,
+                "error_message": err_msg,
+            }
+            summary_rows.append(error_row)
+            by_center_rows.setdefault(str(center), []).append(error_row)
+        finally:
+            if slide is not None:
+                try:
+                    slide.close()
+                except Exception:
+                    pass
 
     if summary_rows:
         summary_df = pd.DataFrame(summary_rows).sort_values("slide_id").reset_index(drop=True)

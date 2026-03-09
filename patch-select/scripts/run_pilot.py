@@ -66,6 +66,7 @@ def find_mask_for_slide(mask_dir: Path, slide_path: str) -> Path | None:
 def run_precheck(slides: list[str], cfg: dict) -> bool:
     mask_dir = Path(cfg["paths"]["mask_dir"])
     ok = True
+    known_mask_failure_statuses = {"read_error", "open_error", "mask_error"}
 
     print("\n=== PRECHECK ===")
     print(f"Mask dir: {mask_dir}")
@@ -73,9 +74,23 @@ def run_precheck(slides: list[str], cfg: dict) -> bool:
         print("FAIL: mask directory does not exist.")
         return False
 
+    by_id: dict[str, dict] = {}
+    summary_path = mask_dir / "mask_summary.csv"
+    if summary_path.exists():
+        with summary_path.open("r", newline="") as f:
+            rows = list(csv.DictReader(f))
+        by_id = {str(r.get("slide_id", "")).strip(): r for r in rows}
+
     missing_masks: list[str] = []
+    known_failures: list[tuple[str, str, str]] = []
     for sp in slides:
+        sid = Path(sp).stem
         if find_mask_for_slide(mask_dir, sp) is None:
+            row = by_id.get(sid, {})
+            status = str(row.get("mask_status_effective") or row.get("mask_status") or "").strip()
+            if status in known_mask_failure_statuses:
+                known_failures.append((Path(sp).name, status, str(row.get("error_message", "")).strip()))
+                continue
             missing_masks.append(Path(sp).name)
 
     found = len(slides) - len(missing_masks)
@@ -85,12 +100,15 @@ def run_precheck(slides: list[str], cfg: dict) -> bool:
         print("Missing masks:")
         for name in missing_masks:
             print(f"  - {name}")
+    if known_failures:
+        print(f"Known mask failures (will be skipped downstream): {len(known_failures)}")
+        for name, status, err in known_failures[:10]:
+            suffix = f" | {err}" if err else ""
+            print(f"  - {name}: {status}{suffix}")
+        if len(known_failures) > 10:
+            print(f"  ... and {len(known_failures) - 10} more")
 
-    summary_path = mask_dir / "mask_summary.csv"
     if summary_path.exists():
-        with summary_path.open("r", newline="") as f:
-            rows = list(csv.DictReader(f))
-        by_id = {str(r.get("slide_id", "")): r for r in rows}
         in_run = [by_id.get(Path(s).stem) for s in slides]
         in_run = [r for r in in_run if r is not None]
         print(f"Mask summary rows matched to run slides: {len(in_run)}/{len(slides)}")
