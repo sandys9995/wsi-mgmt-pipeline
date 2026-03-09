@@ -226,7 +226,7 @@ outputs:
   write_qc_tiles_npy: false
 
 tumor_gate:
-  out_dir: /home/jovyan/WSI-project/wsi-mgmt-pipeline/results/tumor_gate
+  out_dir: /home/jovyan/WSI-project/wsi-mgmt-pipeline/results
   model_path: /home/jovyan/WSI-project/wsi-mgmt-pipeline/Tumor patch extraction/src/results/model_patch/best.pt
   reference_tile_path: /home/jovyan/WSI-project/wsi-mgmt-pipeline/Tumor patch extraction/src/ref_image/target_reference_clean.png
   topk: 5000
@@ -246,7 +246,7 @@ tumor_gate:
   save_preview_normalized: true
 
 uni:
-  out_dir: /home/jovyan/WSI-project/wsi-mgmt-pipeline/results/uni
+  out_dir: /home/jovyan/WSI-project/wsi-mgmt-pipeline/results
   uni_repo_dir: /home/jovyan/WSI-project/sied_git_combined/UNI
   encoder_name: uni2-h
   checkpoint: pytorch_model.bin

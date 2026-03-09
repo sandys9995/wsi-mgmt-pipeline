@@ -59,6 +59,12 @@ def _to_int(x, default: int = 0) -> int:
         return int(default)
 
 
+def _root_summary_path(stage_root: Path, main_out_root: Path, stage_name: str) -> Path:
+    if stage_root.resolve() == main_out_root.resolve():
+        return stage_root / f"{stage_name}_run_summary.csv"
+    return stage_root / "run_summary.csv"
+
+
 def list_wsi_files(wsi_dirs: list[Path], recursive: bool = True) -> list[tuple[str, str]]:
     files: list[tuple[Path, str]] = []
     for wsi_dir in wsi_dirs:
@@ -881,7 +887,7 @@ def main():
 
     if rows:
         df = pd.DataFrame(rows).sort_values("slide_id").reset_index(drop=True)
-        out_csv = tumor_out_root / "run_summary.csv"
+        out_csv = _root_summary_path(tumor_out_root, out_dir, "tumor_gate")
         if out_csv.exists():
             prev = pd.read_csv(out_csv, dtype={"slide_id": "string"})
             prev["slide_id"] = prev["slide_id"].astype(str).str.strip()

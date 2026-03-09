@@ -134,6 +134,12 @@ def _to_bool(x: Any, default: bool = False) -> bool:
     return bool(default)
 
 
+def _root_summary_path(stage_root: Path, main_out_root: Path, stage_name: str) -> Path:
+    if stage_root.resolve() == main_out_root.resolve():
+        return stage_root / f"{stage_name}_run_summary.csv"
+    return stage_root / "run_summary.csv"
+
+
 def _as_list(v: Any) -> list:
     if isinstance(v, list):
         return v
@@ -315,7 +321,7 @@ def main():
     uni_out_root = _resolve_path(project_root, uni_raw.get("out_dir", "data/out/uni"))
     uni_out_root.mkdir(parents=True, exist_ok=True)
 
-    tumor_summary_path = tumor_out_root / "run_summary.csv"
+    tumor_summary_path = _root_summary_path(tumor_out_root, out_root, "tumor_gate")
     qc_summary_path = out_root / "qc" / "run_summary.csv"
     tumor_lookup = _load_tumor_summary(tumor_summary_path)
     qc_lookup = _load_qc_summary(qc_summary_path)
@@ -717,7 +723,7 @@ def main():
         )
 
     run_df = pd.DataFrame(rows).sort_values("slide_id").reset_index(drop=True)
-    run_summary_path = uni_out_root / "run_summary.csv"
+    run_summary_path = _root_summary_path(uni_out_root, out_root, "uni")
     if merge_run_summary and run_summary_path.exists() and len(run_df) > 0:
         prev = pd.read_csv(run_summary_path, dtype={"slide_id": "string"})
         prev["slide_id"] = prev["slide_id"].astype(str).str.strip()

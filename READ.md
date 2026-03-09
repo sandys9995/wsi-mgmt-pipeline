@@ -90,6 +90,43 @@ Notes:
 - Resume is enabled by default (`run.resume: true`) so reruns skip slides that already have QC outputs.
 - Long loops now show `tqdm` progress bars in `run_e2e.py`, `make_masks.py`, `run_pilot.py`, `run_tumor_gate_pilot.py`, `run_uni_features.py`, and QC patch reads in `src/select/pipeline.py`.
 
+## Result Layout
+
+Use one center-first `results/` root on cluster:
+
+```text
+results/
+├── mask_summary.csv
+├── qc/
+│   └── run_summary.csv
+├── tumor_gate_run_summary.csv
+├── uni_run_summary.csv
+├── <center>/
+│   ├── mask/
+│   │   ├── <slide_id>.npy
+│   │   ├── <slide_id>.png
+│   │   └── mask_summary.csv
+│   ├── qc/
+│   │   ├── run_summary.csv
+│   │   └── <slide_id>/
+│   ├── qc_pool/
+│   │   └── <slide_id>/
+│   ├── coords/
+│   │   └── <slide_id>/
+│   ├── tumor_gate/
+│   │   ├── run_summary.csv
+│   │   └── <slide_id>/
+│   └── uni/
+│       ├── run_summary.csv
+│       └── <slide_id>/
+```
+
+Root merged summaries:
+- `mask_summary.csv`
+- `qc/run_summary.csv`
+- `tumor_gate_run_summary.csv`
+- `uni_run_summary.csv`
+
 ## Optional Single-Slide Commands
 
 Single slide UNI:
