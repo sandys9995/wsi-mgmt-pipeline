@@ -1,0 +1,265 @@
+run:
+  name: pilot_cluster
+  n_slides: 0
+  seed: 1337
+  multi_worker_mode: false
+  cpu_workers: 8
+  io_workers: 4
+  resume: true
+  continue_on_fail: true
+  strict_gate: false
+
+paths:
+  wsi_dir:
+    - /home/jovyan/WSI-project/data/ETERNITY_Training
+    - /home/jovyan/WSI-project/data/GR
+    - /home/jovyan/wsi-project-new-storage-3/data/AACHEN
+    - /home/jovyan/wsi-project-new-storage-3/data/DUI
+    - /home/jovyan/wsi-project-new-storage-3/data/DUS
+    - /home/jovyan/wsi-project-new-storage-3/data/ES
+    - /home/jovyan/wsi-project-new-wsi-2/data/CPTAC-GBM
+    - /home/jovyan/wsi-project-new-wsi-2/data/Gotheburg
+    - /home/jovyan/wsi-project-new-wsi-2/data/MERHEIM
+    - /home/jovyan/wsi-project-new-wsi-2/data/TCGA
+  wsi_recursive: true
+  mask_dir: /home/jovyan/WSI-project/wsi-mgmt-pipeline/results
+  out_dir: /home/jovyan/WSI-project/wsi-mgmt-pipeline/results
+
+wsi:
+  out_patch_size: 224
+  scale_factor: 2
+  read_level: 0
+
+mask:
+  strategy: auto_hybrid
+  profile: scale_balanced_v1
+  sparse_canvas_profile: sparse_canvas_pure_v1
+  sparse_canvas_black_frac_min: 0.75
+  sparse_canvas_bbox_frac_max: 0.15
+  target_ds: 64.0
+  expected_frac_min: 0.12
+  expected_frac_max: 0.62
+  expected_frac_min_effective: 0.08
+  expected_frac_max_effective: 0.80
+  dynamic_stain_vectors_enabled: true
+  stain_vector_fixed: false
+  stain_estimation_od_min: 0.12
+  stain_estimation_gray_max: 245
+  stain_estimation_sat_min: 6
+  stain_estimation_min_pixels: 1200
+  stain_estimation_sample_max: 60000
+  stain_estimation_angle_pct_low: 1.0
+  stain_estimation_angle_pct_high: 99.0
+  stain_estimation_max_he_dot: 0.985
+  stain_estimation_min_pair_score: 1.20
+  stain_vector_h: [0.651, 0.701, 0.290]
+  stain_vector_e: [0.216, 0.801, 0.558]
+  stain_vector_r: [0.316, -0.598, 0.737]
+  low_frac_trigger: 0.08
+  high_frac_trigger: 0.70
+  od_q: 55
+  fallback_od_q: 35
+  score_thr: 0.36
+  fallback_score_thr: 0.28
+  w_rapid: 0.55
+  w_od: 0.30
+  w_edge: 0.15
+  use_blood_as_background: false
+  rbc_e_min: 0.58
+  rbc_h_max: 0.42
+  rbc_red_dom_min: 0.06
+  bg_white_gray_min: 244
+  bg_white_sat_max: 20
+  white_guard_gray_min: 242
+  white_guard_sat_max: 20
+  white_void_gray_min: 228
+  white_void_sat_max: 24
+  white_bg_h_max: 0.16
+  white_bg_edge_max: 0.25
+  pale_void_gray_min: 210
+  pale_void_sat_max: 52
+  pale_void_edge_max: 0.16
+  pale_void_h_max: 0.24
+  white_void_min_area_ratio: 0.00035
+  white_void_min_tissue_overlap: 0.002
+  white_void_min_near_tissue: 0.10
+  white_void_edge_margin_px: 4
+  h_rescue_min: 0.34
+  h_rescue_sat_min: 14
+  h_rescue_edge_min: 0.03
+  h_rescue_od_min: 0.08
+  supplement_enabled: true
+  supplement_od_min: 0.10
+  supplement_h_min: 0.18
+  supplement_e_min: 0.12
+  supplement_sat_min: 12
+  supplement_gray_max: 238
+  supplement_edge_min: 0.02
+  supplement_touch_kernel: 15
+  supplement_min_component_area_ratio: 0.00003
+  supplement_white_like_max: 0.28
+  supplement_max_added_frac_of_clean: 0.12
+  soft_rescue_enabled: false
+  h_rescue_min_component_area_ratio: 0.00003
+  soft_rescue_od_min: 0.06
+  soft_rescue_h_min: 0.14
+  soft_rescue_sat_min: 10
+  soft_rescue_gray_max: 242
+  soft_rescue_min_component_area_ratio: 0.00012
+  soft_rescue_white_like_max: 0.55
+  soft_rescue_touch_min: 0.0025
+  soft_rescue_touch_kernel: 11
+  soft_rescue_allow_large_without_touch: false
+  soft_rescue_large_component_factor: 4.0
+  soft_rescue_component_edge_min: 0.02
+  edge_guard_px: 96
+  edge_guard_od_max: 0.12
+  edge_guard_h_max: 0.18
+  edge_guard_score_max: 0.22
+  edge_guard_gray_min: 170
+  edge_guard_sat_max: 120
+  edge_guard_loose_od_max: 0.18
+  edge_guard_loose_h_max: 0.20
+  edge_guard_loose_score_max: 0.35
+  border_component_margin_px: 8
+  border_component_h_max: 0.20
+  border_component_od_max: 0.22
+  border_component_white_min: 0.25
+  border_component_small_area_ratio: 0.0012
+  final_edge_crop_px: 48
+  fill_hole_max_area_ratio: 0.00025
+  ink_black_v_max: 70
+  ink_black_s_min: 18
+  ink_green_h_min: 25
+  ink_green_h_max: 110
+  ink_green_s_min: 22
+  ink_green_v_max: 250
+  green_core_v_min: 70
+  green_outline_dilate_kernel: 31
+  dark_outline_v_max: 145
+  dark_pen_v_max: 165
+  dark_pen_s_min: 12
+  dark_pen_min_area_ratio: 0.00003
+  dark_pen_edge_px: 96
+  dark_pen_min_green_overlap_frac: 0.001
+  dark_pen_dilate_kernel: 5
+  edge_strip_px: 48
+  edge_art_s_max: 30
+  edge_art_v_min: 175
+  stats_min_gray: 8
+  stats_max_gray: 252
+  ink_dilate_kernel: 3
+  black_canvas_gray_max: 8
+  black_canvas_rgb_max: 12
+  reference_patches_dir: ../Tumor patch extraction/src/results/patches_raw
+  reference_sample_patches: 400
+  reference_seed: 1337
+  overwrite: false
+  low_tissue_retry_enabled: true
+  low_tissue_retry_ds: 32.0
+  low_tissue_retry_min_black_frac: 0.70
+  low_tissue_retry_min_gain: 0.0015
+  low_tissue_retry_min_added_px: 3000
+  low_tissue_retry_min_nonwhite_added_frac: 0.85
+  low_tissue_retry_max_white_leak_increase: 0.01
+  low_tissue_retry_max_low_frac: 0.10
+  roi_expand_px: 24
+  roi_expand_frac: 0.08
+  roi_min_component_area_ratio: 0.0002
+  soft_relax_retry_enabled: false
+  soft_relax_max_mask_frac: 0.32
+  soft_relax_min_pale_void_frac: 0.40
+  soft_relax_min_gain: 0.0035
+  soft_relax_min_added_nonwhite_frac: 0.80
+  soft_relax_max_white_leak_increase: 0.02
+
+candidate_grid:
+  stride_level0: 384
+  max_candidates: 40000
+
+qc:
+  min_tissue_frac: 0.80
+  min_focus: 50.0
+  reject_adipose: true
+  adipose_whiteness: 0.75
+  min_brightness: 80
+  max_brightness: 240
+  max_artifact_frac: 0.12
+  max_rbc_frac: 0.20
+  exclude_rbc_from_tissue: true
+  detect_pen_fold: false
+
+scoring:
+  extract_qc_pool_only: true
+  use_hed: true
+  allow_under_target: true
+  max_typeD_frac: 0.02
+  blood_cap_frac: 0.02
+  cell_rich_weights:
+    h_mean: 0.30
+    h_p90: 0.30
+    texture: 0.30
+    e_mean: 0.10
+    white_penalty: 0.40
+    artifact_penalty: 0.60
+    blood_penalty: 0.30
+    rbc_penalty: 0.60
+  quotas:
+    typeA_frac: 0.70
+    typeB_frac: 0.25
+    typeC_frac: 0.05
+    typeD_frac: 0.00
+  target_patches: 10000
+  min_good_patches_reject: 200
+  min_good_patches_flag: 800
+
+spatial:
+  enable_spatial_cap: true
+  cell_size: 256
+  max_per_cell: 40
+
+outputs:
+  write_patches: false
+  write_montage: true
+  montage_n: 200
+  write_qc_pool: true
+  write_qc_tiles_npy: false
+
+tumor_gate:
+  out_dir: /home/jovyan/WSI-project/wsi-mgmt-pipeline/results/tumor_gate
+  model_path: /home/jovyan/WSI-project/wsi-mgmt-pipeline/Tumor patch extraction/src/results/model_patch/best.pt
+  reference_tile_path: /home/jovyan/WSI-project/wsi-mgmt-pipeline/Tumor patch extraction/src/ref_image/target_reference_clean.png
+  topk: 5000
+  tumor_thr: 0.738
+  mid_thr: 0.50
+  batch_size: 256
+  io_workers: 4
+  overwrite: false
+  prefer_qc_pool: true
+  export_high_only: true
+  high_only_source: all_scored
+  min_high_tumor_patches_for_uni: 200
+  min_scored_patches_for_uni: 300
+  min_high_ratio_for_uni: 0.20
+  save_preview_patches: true
+  save_preview_limit: 200
+  save_preview_normalized: true
+
+uni:
+  out_dir: /home/jovyan/WSI-project/wsi-mgmt-pipeline/results/uni
+  uni_repo_dir: /home/jovyan/WSI-project/sied_git_combined/UNI
+  encoder_name: uni2-h
+  checkpoint: pytorch_model.bin
+  assets_dir: /home/jovyan/WSI-project/sied_git_combined/UNI/assets/ckpts
+  device: auto
+  batch_size: 128
+  io_workers: 4
+  coord_source: high_tumor_only
+  use_uni_ready_only: true
+  max_patches_per_slide: 5000
+  min_ok_patches_per_slide: 200
+  output_dtype: float16
+  merge_run_summary: true
+  use_macenko: true
+  reference_tile_path: /home/jovyan/WSI-project/wsi-mgmt-pipeline/Tumor patch extraction/src/ref_image/target_reference_clean.png
+  overwrite: false
