@@ -20,16 +20,14 @@ def _resolve_path(project_root: Path, p: str | Path) -> Path:
     return (project_root / p).resolve()
 
 
-def _run_stage(name: str, cmd: list[str], cwd: Path) -> float:
+def _run_stage(name: str, cmd: list[str], cwd: Path) -> tuple[float, int]:
     print(f"\n=== STAGE: {name} ===")
     print(" ".join(cmd))
     t0 = time.time()
     proc = subprocess.run(cmd, cwd=str(cwd))
     dt = float(time.time() - t0)
     print(f"[stage:{name}] exit={proc.returncode} elapsed={dt:.1f}s")
-    if proc.returncode != 0:
-        raise SystemExit(proc.returncode)
-    return dt
+    return dt, int(proc.returncode)
 
 
 def _parse_stages(raw: str) -> list[str]:
@@ -84,6 +82,16 @@ def main() -> None:
         action="store_true",
         help="Relax gate thresholds for smoke runs (dataset>=1, digital>=0).",
     )
+    ap.add_argument(
+        "--strict-gate",
+        action="store_true",
+        help="Treat gate stage failure as fatal. Default is non-blocking gate.",
+    )
+    ap.add_argument(
+        "--continue-on-fail",
+        action="store_true",
+        help="Continue remaining stages even if a non-gate stage fails.",
+    )
     ap.add_argument("--overwrite-uni", action="store_true", help="Pass --overwrite to uni stage.")
     args = ap.parse_args()
 
@@ -114,6 +122,12 @@ def main() -> None:
         print(f"io_workers override: {args.io_workers}")
     if args.smoke_gate:
         print("smoke_gate: enabled (dataset-pass-min=1, digital-pass-min=0)")
+    print(f"strict_gate: {bool(args.strict_gate)}")
+    if args.continue_on_fail:
+        print("continue_on_fail: enabled")
+
+    stage_codes: dict[str, int] = {}
+    hard_fail_code = 0
 
     for stage in stages:
         if stage == "mask":
@@ -169,13 +183,42 @@ def main() -> None:
         else:
             raise RuntimeError(f"Unhandled stage '{stage}'")
 
-        timings[stage] = _run_stage(stage, cmd, cwd=project_root)
+        dt, code = _run_stage(stage, cmd, cwd=project_root)
+        timings[stage] = dt
+        stage_codes[stage] = int(code)
+        if code == 0:
+            continue
+
+        if stage == "gate" and (not args.strict_gate):
+            print(
+                "[warn] gate failed but pipeline will continue "
+                "(non-blocking gate mode)."
+            )
+            print(
+                "[warn] If this was a pilot run, use --smoke-gate for relaxed "
+                "gate thresholds, or run --stages mask,qc,tumor,uni."
+            )
+            continue
+
+        if args.continue_on_fail:
+            if hard_fail_code == 0:
+                hard_fail_code = int(code)
+            print(
+                f"[warn] stage '{stage}' failed (exit={code}) "
+                "but continuing due to --continue-on-fail."
+            )
+            continue
+
+        raise SystemExit(code)
 
     total = float(sum(timings.values()))
     print("\n=== E2E DONE ===")
     for k in stages:
-        print(f"{k}: {timings[k]:.1f}s")
+        code = int(stage_codes.get(k, 0))
+        print(f"{k}: {timings[k]:.1f}s exit={code}")
     print(f"total: {total:.1f}s")
+    if hard_fail_code != 0:
+        raise SystemExit(hard_fail_code)
 
 
 if __name__ == "__main__":

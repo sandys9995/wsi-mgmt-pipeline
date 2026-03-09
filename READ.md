@@ -82,6 +82,11 @@ nohup python -u scripts/run_e2e.py \
 tail -f logs/e2e_mw_*.log
 ```
 
+Notes:
+- Gate is non-blocking by default in `run_e2e.py` (pipeline continues to tumor/uni even if gate fails).
+- Use `--strict-gate` if you want gate failure to stop the run.
+- Use `--continue-on-fail` to continue even if non-gate stages fail.
+
 ## Optional Single-Slide Commands
 
 Single slide UNI:
