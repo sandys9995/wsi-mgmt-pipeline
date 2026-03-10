@@ -61,6 +61,30 @@ python -u scripts/check_mask_qc_gate.py \
   --run-summary data/out/qc/run_summary.csv
 ```
 
+## 8b) Migrate Legacy Mask Names To `slide_uid`
+
+Use this once if you created masks before the `slide_uid` change and want to reuse them.
+
+Dry-run first:
+
+```bash
+python -u scripts/migrate_mask_outputs.py --config configs/pilot.cluster.yaml
+```
+
+Apply migration:
+
+```bash
+python -u scripts/migrate_mask_outputs.py --config configs/pilot.cluster.yaml --apply
+```
+
+If duplicate basenames existed inside the same center, they are ambiguous under the old naming scheme.
+- Default behavior with `--apply`: move those old ambiguous basename files into `results/migration/ambiguous_legacy/` and rerun only those slides.
+- If you explicitly want them removed instead:
+
+```bash
+python -u scripts/migrate_mask_outputs.py --config configs/pilot.cluster.yaml --apply --delete-ambiguous
+```
+
 ## 9) Long Run in Tmux (Recommended)
 
 Prefer `tmux` over `nohup` for production runs. `tqdm` stays clean on a real TTY, and the pipeline still writes internal stage logs under `results/logs/`.
