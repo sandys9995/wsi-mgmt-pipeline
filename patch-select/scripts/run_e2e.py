@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.utils.runlog import progress, stage_logger
 
 
 VALID_STAGES = ("mask", "qc", "gate", "tumor", "uni")
@@ -21,13 +23,13 @@ def _resolve_path(project_root: Path, p: str | Path) -> Path:
     return (project_root / p).resolve()
 
 
-def _run_stage(name: str, cmd: list[str], cwd: Path) -> tuple[float, int]:
-    print(f"\n=== STAGE: {name} ===")
-    print(" ".join(cmd))
+def _run_stage(name: str, cmd: list[str], cwd: Path, logger) -> tuple[float, int]:
+    logger.info(f"=== STAGE: {name} ===")
+    logger.debug(" ".join(cmd))
     t0 = time.time()
     proc = subprocess.run(cmd, cwd=str(cwd))
     dt = float(time.time() - t0)
-    print(f"[stage:{name}] exit={proc.returncode} elapsed={dt:.1f}s")
+    logger.info(f"[stage:{name}] exit={proc.returncode} elapsed={dt:.1f}s")
     return dt, int(proc.returncode)
 
 
@@ -108,6 +110,8 @@ def main() -> None:
     continue_on_fail = bool(args.continue_on_fail or continue_on_fail_cfg)
 
     paths_cfg = cfg.get("paths", {})
+    log_root = _resolve_path(project_root, paths_cfg.get("out_dir", "data/out"))
+    logger, interactive = stage_logger("e2e", log_root, verbose=False)
     mask_summary = _resolve_path(project_root, paths_cfg.get("mask_dir", "data/masks")) / "mask_summary.csv"
     qc_summary = _resolve_path(project_root, paths_cfg.get("out_dir", "data/out")) / "qc" / "run_summary.csv"
 
@@ -115,28 +119,26 @@ def main() -> None:
     python = sys.executable
     timings: dict[str, float] = {}
 
-    print("=== E2E PIPELINE ===")
-    print(f"Config: {cfg_path}")
-    print(f"Stages: {stages}")
+    logger.info("=== E2E PIPELINE ===")
+    logger.info(f"Config: {cfg_path}")
+    logger.info(f"Stages: {stages}")
     if args.n_slides is not None:
-        print(f"n_slides override: {args.n_slides}")
+        logger.info(f"n_slides override: {args.n_slides}")
     if args.multi_worker_mode:
-        print("multi_worker_mode: enabled")
+        logger.info("multi_worker_mode: enabled")
     if args.cpu_workers is not None:
-        print(f"cpu_workers override: {args.cpu_workers}")
+        logger.info(f"cpu_workers override: {args.cpu_workers}")
     if args.io_workers is not None:
-        print(f"io_workers override: {args.io_workers}")
+        logger.info(f"io_workers override: {args.io_workers}")
     if args.smoke_gate:
-        print("smoke_gate: enabled (dataset-pass-min=1, digital-pass-min=0)")
-    print(f"strict_gate: {strict_gate}")
-    print(f"continue_on_fail: {continue_on_fail}")
+        logger.info("smoke_gate: enabled (dataset-pass-min=1, digital-pass-min=0)")
+    logger.info(f"strict_gate: {strict_gate}")
+    logger.info(f"continue_on_fail: {continue_on_fail}")
 
     stage_codes: dict[str, int] = {}
     hard_fail_code = 0
 
-    stage_bar = tqdm(stages, desc="[e2e] stages", unit="stage", dynamic_ncols=True)
-    for stage in stage_bar:
-        stage_bar.set_postfix_str(stage)
+    for stage in progress(stages, interactive=interactive, desc="[e2e] stages", unit="stage"):
         if stage == "mask":
             cmd = [python, "-u", "scripts/make_masks.py", "--config", str(cfg_path)]
             if args.n_slides is not None:
@@ -198,18 +200,18 @@ def main() -> None:
         else:
             raise RuntimeError(f"Unhandled stage '{stage}'")
 
-        dt, code = _run_stage(stage, cmd, cwd=project_root)
+        dt, code = _run_stage(stage, cmd, cwd=project_root, logger=logger)
         timings[stage] = dt
         stage_codes[stage] = int(code)
         if code == 0:
             continue
 
         if stage == "gate" and (not strict_gate):
-            print(
+            logger.warning(
                 "[warn] gate failed but pipeline will continue "
                 "(non-blocking gate mode)."
             )
-            print(
+            logger.warning(
                 "[warn] If this was a pilot run, use --smoke-gate for relaxed "
                 "gate thresholds, or run --stages mask,qc,tumor,uni."
             )
@@ -218,7 +220,7 @@ def main() -> None:
         if continue_on_fail:
             if hard_fail_code == 0:
                 hard_fail_code = int(code)
-            print(
+            logger.warning(
                 f"[warn] stage '{stage}' failed (exit={code}) "
                 "but continuing due to --continue-on-fail."
             )
@@ -227,11 +229,11 @@ def main() -> None:
         raise SystemExit(code)
 
     total = float(sum(timings.values()))
-    print("\n=== E2E DONE ===")
+    logger.info("=== E2E DONE ===")
     for k in stages:
         code = int(stage_codes.get(k, 0))
-        print(f"{k}: {timings[k]:.1f}s exit={code}")
-    print(f"total: {total:.1f}s")
+        logger.info(f"{k}: {timings[k]:.1f}s exit={code}")
+    logger.info(f"total: {total:.1f}s")
     if hard_fail_code != 0:
         raise SystemExit(hard_fail_code)
 

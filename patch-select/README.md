@@ -19,3 +19,7 @@ results/
 ```
 
 This keeps each center together while still preserving one merged summary per stage at the root.
+
+Notes:
+- Per-slide folders and artifact filenames use `slide_uid`, not only basename `slide_id`, so duplicate names in nested source folders are safe.
+- Stage logs are written under the output root `logs/` directory.

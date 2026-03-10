@@ -8,6 +8,10 @@ import sys
 import pandas as pd
 
 
+def _key_col(df: pd.DataFrame) -> str:
+    return "slide_uid" if "slide_uid" in df.columns else "slide_id"
+
+
 def _pick_status(row: pd.Series) -> str:
     v = row.get("mask_status_effective", None)
     if v is None:
@@ -71,17 +75,29 @@ def main() -> int:
         print(f"Missing file: {run_path}")
         return 2
 
-    mask_df = pd.read_csv(mask_path, dtype={"slide_id": "string"})
-    run_df = pd.read_csv(run_path, dtype={"slide_id": "string"})
-    if "slide_id" not in mask_df.columns or "slide_id" not in run_df.columns:
-        print("Both CSVs must contain a 'slide_id' column.")
+    mask_df = pd.read_csv(mask_path, dtype={"slide_id": "string", "slide_uid": "string"})
+    run_df = pd.read_csv(run_path, dtype={"slide_id": "string", "slide_uid": "string"})
+    if "slide_id" not in mask_df.columns and "slide_uid" not in mask_df.columns:
+        print("Mask CSV must contain 'slide_id' or 'slide_uid'.")
         return 2
+    if "slide_id" not in run_df.columns and "slide_uid" not in run_df.columns:
+        print("Run CSV must contain 'slide_id' or 'slide_uid'.")
+        return 2
+    if "slide_id" not in mask_df.columns and "slide_uid" in mask_df.columns:
+        mask_df["slide_id"] = mask_df["slide_uid"]
+    if "slide_id" not in run_df.columns and "slide_uid" in run_df.columns:
+        run_df["slide_id"] = run_df["slide_uid"]
     mask_df["slide_id"] = mask_df["slide_id"].astype(str).str.strip()
     run_df["slide_id"] = run_df["slide_id"].astype(str).str.strip()
+    if "slide_uid" in mask_df.columns:
+        mask_df["slide_uid"] = mask_df["slide_uid"].astype(str).str.strip()
+    if "slide_uid" in run_df.columns:
+        run_df["slide_uid"] = run_df["slide_uid"].astype(str).str.strip()
+    join_col = "slide_uid" if ("slide_uid" in mask_df.columns and "slide_uid" in run_df.columns) else "slide_id"
 
     merged = mask_df.merge(
-        run_df[["slide_id", "candidates_after_mask", "qc_pass"]],
-        on="slide_id",
+        run_df[[join_col, "candidates_after_mask", "qc_pass"]],
+        on=join_col,
         how="left",
         suffixes=("", "_run"),
     )

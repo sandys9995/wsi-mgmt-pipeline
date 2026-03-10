@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -10,11 +11,12 @@ from typing import Any
 
 import pandas as pd
 import yaml
-from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.select.pipeline import run_on_slides
+from src.utils.runlog import progress, stage_logger
+from src.utils.slides import list_slide_records, slide_key_from_row, slide_match
 
 
 WSI_EXTS = (".svs", ".ndpi", ".mrxs", ".tif", ".tiff")
@@ -36,42 +38,33 @@ def _as_list(v: Any) -> list:
     return [v]
 
 
-def list_wsi_files(wsi_dirs: list[Path], recursive: bool = True) -> list[tuple[str, str]]:
-    files: list[tuple[Path, str]] = []
-    for wsi_dir in wsi_dirs:
-        center = wsi_dir.name
-        if recursive:
-            files.extend([(p, center) for p in sorted(wsi_dir.rglob("*")) if p.is_file() and p.suffix.lower() in WSI_EXTS])
-        else:
-            files.extend([(p, center) for p in sorted(wsi_dir.iterdir()) if p.is_file() and p.suffix.lower() in WSI_EXTS])
-    # de-dup + stable order
-    uniq: list[tuple[str, str]] = []
-    seen = set()
-    for p, center in files:
-        if p.stem not in seen:
-            uniq.append((str(p), str(center)))
-            seen.add(p.stem)
-    return uniq
+def list_wsi_files(wsi_dirs: list[Path], recursive: bool = True) -> list[dict[str, str]]:
+    return list_slide_records(wsi_dirs, recursive=recursive, exts=WSI_EXTS)
 
 
-def find_mask_for_slide(mask_dir: Path, slide_path: str) -> Path | None:
-    stem = Path(slide_path).stem
+def find_mask_for_slide(mask_dir: Path, slide_rec: dict[str, str]) -> Path | None:
+    stem = str(slide_rec["slide_uid"]).strip()
     for ext in MASK_EXTS:
         p = mask_dir / f"{stem}{ext}"
+        if p.exists():
+            return p
+    stem_fallback = str(slide_rec["slide_id"]).strip()
+    for ext in MASK_EXTS:
+        p = mask_dir / f"{stem_fallback}{ext}"
         if p.exists():
             return p
     return None
 
 
-def run_precheck(slides: list[str], cfg: dict) -> bool:
+def run_precheck(slides: list[dict[str, str]], cfg: dict, logger) -> bool:
     mask_dir = Path(cfg["paths"]["mask_dir"])
     ok = True
     known_mask_failure_statuses = {"read_error", "open_error", "mask_error"}
 
-    print("\n=== PRECHECK ===")
-    print(f"Mask dir: {mask_dir}")
+    logger.info("=== PRECHECK ===")
+    logger.info(f"Mask dir: {mask_dir}")
     if not mask_dir.exists():
-        print("FAIL: mask directory does not exist.")
+        logger.error("FAIL: mask directory does not exist.")
         return False
 
     by_id: dict[str, dict] = {}
@@ -79,57 +72,56 @@ def run_precheck(slides: list[str], cfg: dict) -> bool:
     if summary_path.exists():
         with summary_path.open("r", newline="") as f:
             rows = list(csv.DictReader(f))
-        by_id = {str(r.get("slide_id", "")).strip(): r for r in rows}
+        by_id = {slide_key_from_row(r): r for r in rows}
 
     missing_masks: list[str] = []
     known_failures: list[tuple[str, str, str]] = []
-    for sp in slides:
-        sid = Path(sp).stem
-        if find_mask_for_slide(mask_dir, sp) is None:
-            row = by_id.get(sid, {})
+    for rec in slides:
+        if find_mask_for_slide(mask_dir, rec) is None:
+            row = by_id.get(str(rec["slide_uid"]).strip(), {})
             status = str(row.get("mask_status_effective") or row.get("mask_status") or "").strip()
             if status in known_mask_failure_statuses:
-                known_failures.append((Path(sp).name, status, str(row.get("error_message", "")).strip()))
+                known_failures.append((Path(str(rec["path"])).name, status, str(row.get("error_message", "")).strip()))
                 continue
-            missing_masks.append(Path(sp).name)
+            missing_masks.append(Path(str(rec["path"])).name)
 
     found = len(slides) - len(missing_masks)
-    print(f"Mask files found: {found}/{len(slides)}")
+    logger.info(f"Mask files found: {found}/{len(slides)}")
     if missing_masks:
         ok = False
-        print("Missing masks:")
+        logger.error("Missing masks:")
         for name in missing_masks:
-            print(f"  - {name}")
+            logger.error(f"  - {name}")
     if known_failures:
-        print(f"Known mask failures (will be skipped downstream): {len(known_failures)}")
+        logger.warning(f"Known mask failures (will be skipped downstream): {len(known_failures)}")
         for name, status, err in known_failures[:10]:
             suffix = f" | {err}" if err else ""
-            print(f"  - {name}: {status}{suffix}")
+            logger.warning(f"  - {name}: {status}{suffix}")
         if len(known_failures) > 10:
-            print(f"  ... and {len(known_failures) - 10} more")
+            logger.warning(f"  ... and {len(known_failures) - 10} more")
 
     if summary_path.exists():
-        in_run = [by_id.get(Path(s).stem) for s in slides]
+        in_run = [by_id.get(str(rec["slide_uid"]).strip()) for rec in slides]
         in_run = [r for r in in_run if r is not None]
-        print(f"Mask summary rows matched to run slides: {len(in_run)}/{len(slides)}")
+        logger.info(f"Mask summary rows matched to run slides: {len(in_run)}/{len(slides)}")
         status_key = "mask_status_effective"
         if in_run and status_key in in_run[0]:
             counts: dict[str, int] = {}
             for r in in_run:
                 st = str(r.get(status_key, "")).strip() or "unknown"
                 counts[st] = counts.get(st, 0) + 1
-            print("Effective status counts:")
+            logger.info("Effective status counts:")
             for k in sorted(counts):
-                print(f"  {k}: {counts[k]}")
+                logger.info(f"  {k}: {counts[k]}")
     else:
-        print("Mask summary not found (data/masks/mask_summary.csv).")
+        logger.warning("Mask summary not found (data/masks/mask_summary.csv).")
 
-    print("PRECHECK: PASS" if ok else "PRECHECK: FAIL")
+    logger.info("PRECHECK: PASS" if ok else "PRECHECK: FAIL")
     return ok
 
 
-def _is_slide_done_for_qc(slide_path: str, cfg: dict) -> bool:
-    sid = Path(slide_path).stem
+def _is_slide_done_for_qc(slide_rec: dict[str, str], cfg: dict) -> bool:
+    sid = str(slide_rec["slide_uid"])
     out_dir = Path(cfg["paths"]["out_dir"])
     extract_qc_pool_only = bool(cfg.get("scoring", {}).get("extract_qc_pool_only", False))
     if extract_qc_pool_only:
@@ -163,6 +155,7 @@ def main():
         default=None,
         help="Skip slides that already have stage outputs (default from config run.resume, fallback true).",
     )
+    parser.add_argument("--verbose", action="store_true", help="Enable detailed console logs.")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -197,30 +190,28 @@ def main():
     if len(slide_items) == 0:
         raise RuntimeError(f"No WSIs found in {wsi_dirs} with extensions {WSI_EXTS}")
 
+    logger, interactive = stage_logger("qc_driver", out_dir, verbose=bool(args.verbose))
     n = int(args.n_slides) if args.n_slides is not None else int(cfg["run"].get("n_slides", 0))
     if n > 0:
         slide_items = slide_items[:n]
 
-    print("\n=== PILOT RUN ===")
-    print(f"Config: {cfg_path}")
-    print(f"WSI dirs: {[str(p) for p in wsi_dirs]}")
-    print(f"WSI recursive scan: {wsi_recursive}")
-    print(f"Multi-worker mode: {multi_worker_mode} (workers={workers})")
-    print(f"Resume mode: {resume}")
-    print(f"Mask dir: {mask_dir}")
-    print(f"Out dir:  {out_dir}")
-    print(f"Slides ({len(slide_items)}):")
-    for i, (s, center) in enumerate(slide_items, 1):
-        print(f"  {i:02d}. [{center}] {Path(s).name}")
+    logger.info("=== PILOT RUN ===")
+    logger.info(f"Config: {cfg_path}")
+    logger.info(f"WSI recursive scan: {wsi_recursive}")
+    logger.info(f"Multi-worker mode: {multi_worker_mode} (workers={workers})")
+    logger.info(f"Resume mode: {resume}")
+    logger.info(f"Mask dir: {mask_dir}")
+    logger.info(f"Out dir: {out_dir}")
+    logger.info(f"Slides: {len(slide_items)} across {len({rec['center'] for rec in slide_items})} centers")
 
-    by_center: dict[str, list[str]] = {}
-    for sp, center in slide_items:
-        by_center.setdefault(center, []).append(sp)
+    by_center: dict[str, list[dict[str, str]]] = {}
+    for rec in slide_items:
+        by_center.setdefault(str(rec["center"]), []).append(rec)
 
     all_ok = True
-    center_jobs: list[tuple[str, list[str], dict]] = []
-    for center, center_slides in tqdm(
-        sorted(by_center.items()), desc="[qc] centers", unit="center", dynamic_ncols=True
+    center_jobs: list[tuple[str, list[dict[str, str]], dict]] = []
+    for center, center_slides in progress(
+        sorted(by_center.items()), interactive=interactive, desc="[qc] centers", unit="center"
     ):
         center_mask_dir = mask_dir / center / "mask"
         center_out_dir = out_dir / center
@@ -228,71 +219,74 @@ def main():
         center_cfg["paths"] = dict(cfg["paths"])
         center_cfg["paths"]["mask_dir"] = str(center_mask_dir)
         center_cfg["paths"]["out_dir"] = str(center_out_dir)
-        print(f"\n--- Center: {center} ({len(center_slides)} slides) ---")
-        precheck_ok = run_precheck(center_slides, center_cfg)
+        logger.info(f"--- Center: {center} ({len(center_slides)} slides) ---")
+        precheck_ok = run_precheck(center_slides, center_cfg, logger)
         if not precheck_ok:
             all_ok = False
             continue
         if resume:
-            pending_slides = [sp for sp in center_slides if not _is_slide_done_for_qc(sp, center_cfg)]
+            pending_slides = [rec for rec in center_slides if not _is_slide_done_for_qc(rec, center_cfg)]
             skipped_done = len(center_slides) - len(pending_slides)
-            print(f"Resume scan: pending={len(pending_slides)} skipped_done={skipped_done}")
+            logger.info(f"Resume scan: pending={len(pending_slides)} skipped_done={skipped_done}")
         else:
             pending_slides = list(center_slides)
         if pending_slides:
             center_jobs.append((center, pending_slides, center_cfg))
         else:
-            print(f"No pending slides for center={center}; skipping extraction.")
+            logger.info(f"No pending slides for center={center}; skipping extraction.")
 
     if not all_ok:
         raise SystemExit(1)
     if args.precheck_only:
         return
     if not center_jobs:
-        print("No pending slides across all centers. Nothing to run.")
+        logger.info("No pending slides across all centers. Nothing to run.")
         return
 
     if multi_worker_mode and workers > 1 and len(center_jobs) > 1:
         n_pool = min(workers, len(center_jobs))
-        print(f"Running QC extraction in parallel across centers (workers={n_pool})")
+        logger.info(f"Running QC extraction in parallel across centers (workers={n_pool})")
         with ThreadPoolExecutor(max_workers=n_pool) as ex:
             fut_map = {
-                ex.submit(run_on_slides, center_slides, center_cfg): center
+                ex.submit(run_on_slides, center_slides, center_cfg, logger, interactive): center
                 for center, center_slides, center_cfg in center_jobs
             }
             for fut in as_completed(fut_map):
                 center = fut_map[fut]
                 try:
                     fut.result()
-                    print(f"Center completed: {center}")
+                    logger.info(f"Center completed: {center}")
                 except Exception as e:
-                    print(f"Center failed: {center} ({type(e).__name__}: {e})")
+                    logger.error(f"Center failed: {center} ({type(e).__name__}: {e})")
                     raise
     else:
-        for center, center_slides, center_cfg in tqdm(
-            center_jobs, desc="[qc] center runs", unit="center", dynamic_ncols=True
+        for center, center_slides, center_cfg in progress(
+            center_jobs, interactive=interactive, desc="[qc] center runs", unit="center"
         ):
-            run_on_slides(center_slides, center_cfg)
+            run_on_slides(center_slides, center_cfg, logger, interactive)
+            gc.collect()
 
     # Aggregate per-center QC summaries into a global summary for gate checks.
     agg_rows: list[pd.DataFrame] = []
-    for center in tqdm(sorted(by_center.keys()), desc="[qc] aggregate", unit="center", dynamic_ncols=True):
+    for center in progress(sorted(by_center.keys()), interactive=interactive, desc="[qc] aggregate", unit="center"):
         center_summary = out_dir / center / "qc" / "run_summary.csv"
         if center_summary.exists():
-            df = pd.read_csv(center_summary, dtype={"slide_id": "string"})
-            df["slide_id"] = df["slide_id"].astype(str).str.strip()
+            df = pd.read_csv(center_summary, dtype={"slide_id": "string", "slide_uid": "string"})
+            if "slide_uid" in df.columns:
+                df["slide_uid"] = df["slide_uid"].astype(str).str.strip()
             df["center"] = str(center)
             agg_rows.append(df)
     if agg_rows:
         qc_global_dir = out_dir / "qc"
         qc_global_dir.mkdir(parents=True, exist_ok=True)
         agg = pd.concat(agg_rows, ignore_index=True, sort=False)
-        agg = agg.drop_duplicates(subset=["slide_id"], keep="last").sort_values("slide_id").reset_index(drop=True)
+        key_col = "slide_uid" if "slide_uid" in agg.columns else "slide_id"
+        agg = agg.drop_duplicates(subset=[key_col], keep="last").sort_values(["center", "slide_id"]).reset_index(drop=True)
         agg_path = qc_global_dir / "run_summary.csv"
         agg.to_csv(agg_path, index=False)
-        print(f"Aggregated QC summary -> {agg_path}")
+        logger.info(f"Aggregated QC summary -> {agg_path}")
 
-    print("\nDone.")
+    logger.info("Done.")
 
 
 if __name__ == "__main__":

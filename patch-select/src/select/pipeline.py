@@ -1,10 +1,13 @@
 # src/select/pipeline.py
 from __future__ import annotations
 
+import gc
 import numpy as np
 from pathlib import Path
 import pandas as pd
-from tqdm import tqdm
+
+from src.utils.runlog import PeriodicProgress, progress, stage_logger
+from src.utils.slides import slide_key_from_row
 
 def _stem(p: str) -> str:
     return Path(p).stem
@@ -14,31 +17,41 @@ def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
-def _find_mask(mask_dir: Path, slide_path: str) -> Path:
-    stem = Path(slide_path).stem
-    candidates = [
-        mask_dir / f"{stem}.npy",
-        mask_dir / f"{stem}.png",
-        mask_dir / f"{stem}.tif",
-        mask_dir / f"{stem}.tiff",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    raise FileNotFoundError(f"No mask found for slide '{stem}' in {mask_dir}")
+def _find_mask(mask_dir: Path, slide_rec: dict[str, str] | str) -> Path:
+    if isinstance(slide_rec, dict):
+        candidates = [
+            str(slide_rec.get("slide_uid", "")).strip(),
+            str(slide_rec.get("slide_id", "")).strip(),
+            Path(str(slide_rec.get("path", ""))).stem,
+        ]
+    else:
+        stem = Path(slide_rec).stem
+        candidates = [stem]
+    for stem in candidates:
+        if not stem:
+            continue
+        files = [
+            mask_dir / f"{stem}.npy",
+            mask_dir / f"{stem}.png",
+            mask_dir / f"{stem}.tif",
+            mask_dir / f"{stem}.tiff",
+        ]
+        for c in files:
+            if c.exists():
+                return c
+    raise FileNotFoundError(f"No mask found for slide in {mask_dir}")
 
 
 def _load_mask_summary(mask_dir: Path) -> dict[str, dict]:
     summary = mask_dir / "mask_summary.csv"
     if not summary.exists():
         return {}
-    df = pd.read_csv(summary, dtype={"slide_id": "string"})
-    if "slide_id" not in df.columns:
+    df = pd.read_csv(summary, dtype={"slide_id": "string", "slide_uid": "string"})
+    if "slide_id" not in df.columns and "slide_uid" not in df.columns:
         return {}
     out = {}
     for _, row in df.iterrows():
-        sid = str(row["slide_id"]).strip()
-        out[sid] = dict(row)
+        out[slide_key_from_row(dict(row))] = dict(row)
     return out
 
 
@@ -137,7 +150,12 @@ def _clip_level0_coords(xy0: np.ndarray, wsi, read_size: int) -> np.ndarray:
     return np.stack([x, y], axis=1).astype(np.int32)
 
 
-def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
+def run_on_slides(
+    slide_paths: list[str] | list[dict[str, str]],
+    cfg: dict,
+    logger=None,
+    interactive: bool | None = None,
+) -> None:
     from src.io.wsi import open_wsi
     from src.preprocess.mask import load_mask
     from src.qc.metrics import (
@@ -155,6 +173,10 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
     out_root = Path(cfg["paths"]["out_dir"])
     mask_dir = Path(cfg["paths"]["mask_dir"])
     _ensure_dir(out_root)
+    if logger is None:
+        logger, interactive = stage_logger("qc", out_root, verbose=False)
+    if interactive is None:
+        interactive = False
 
     coords_root = out_root / "coords"
     qc_root = out_root / "qc"
@@ -166,6 +188,8 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
     _ensure_dir(patches_lvl0_root)
     run_summary_rows: list[dict] = []
     mask_diag = _load_mask_summary(mask_dir)
+    reporter = PeriodicProgress(logger, "qc", total=len(slide_paths), every=25)
+    counts = {"ok": 0, "empty_mask": 0, "empty_qc": 0, "reject": 0, "error": 0}
 
     seed = int(cfg["run"].get("seed", 1337))
     rng = np.random.default_rng(seed)
@@ -185,10 +209,21 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
     max_artifact_frac = float(cfg["qc"].get("max_artifact_frac", 0.30))
     max_rbc_frac = float(cfg["qc"].get("max_rbc_frac", 0.45))
 
-    for sp in tqdm(slide_paths, desc="[qc] slides", unit="slide", dynamic_ncols=True):
-        sid = _stem(sp)
-        print(f"\n=== {sid} ===")
-        slide_diag = mask_diag.get(sid, {})
+    for idx, slide_item in enumerate(progress(slide_paths, interactive=interactive, desc="[qc] slides", unit="slide"), start=1):
+        if isinstance(slide_item, dict):
+            sp = str(slide_item["path"])
+            slide_id = str(slide_item.get("slide_id", _stem(sp)))
+            slide_uid = str(slide_item.get("slide_uid", slide_id))
+            slide_relpath = str(slide_item.get("slide_relpath", slide_id))
+            center = str(slide_item.get("center", ""))
+        else:
+            sp = str(slide_item)
+            slide_id = _stem(sp)
+            slide_uid = slide_id
+            slide_relpath = slide_id
+            center = ""
+
+        slide_diag = mask_diag.get(slide_uid) or mask_diag.get(slide_id, {})
         resolved_diag = _resolve_slide_diag(slide_diag)
         slide_mask_status = str(resolved_diag["mask_status"])
         slide_mask_status_global = str(resolved_diag["mask_status_global"])
@@ -202,7 +237,10 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
 
         def _base_summary_row() -> dict:
             return {
-                "slide_id": sid,
+                "slide_id": slide_id,
+                "slide_uid": slide_uid,
+                "slide_relpath": slide_relpath,
+                "center": center,
                 "mask_status": slide_mask_status,
                 "mask_status_global": slide_mask_status_global,
                 "mask_status_effective": slide_mask_status_effective,
@@ -216,14 +254,17 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
 
         if slide_mask_status_effective in {"read_error", "open_error", "mask_error"}:
             msg = str(slide_diag.get("error_message", "")).strip() or "mask stage marked slide unreadable"
-            print(f"Skip slide due to mask-stage failure: {msg}")
+            logger.warning(f"[qc] skip {slide_uid} due to mask-stage failure: {msg}")
             run_summary_rows.append(_error_summary_row(_base_summary_row(), "skipped_mask_error", msg))
+            counts["error"] += 1
+            reporter.update(idx, ok=counts["ok"], reject=counts["reject"], err=counts["error"])
             continue
 
         wsi = None
+        tiles = tiles_qc = xy0_qc = grid_qc = tf_qc = fs_qc = bm_qc = af_qc = rbcf_qc = ad_qc = None
         try:
             wsi = open_wsi(sp)
-            mask_path = _find_mask(mask_dir, sp)
+            mask_path = _find_mask(mask_dir, slide_item)
             mask = load_mask(mask_path)
 
             mask_level = _infer_mask_level(mask, wsi)
@@ -232,11 +273,6 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
             if ds <= 16:
                 stride = max(4, stride // 2)
 
-            print(
-                f"Mask: {mask_path.name} shape={mask.shape} inferred_level={mask_level} "
-                f"ds={ds:.2f} -> stride_mask={stride} (stride_level0={stride0})"
-            )
-
             mh, mw = mask.shape[:2]
             ys = np.arange(0, mh, stride, dtype=np.int32)
             xs = np.arange(0, mw, stride, dtype=np.int32)
@@ -244,7 +280,7 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
             grid = grid[mask[grid[:, 1], grid[:, 0]] > 0]
 
             if len(grid) == 0:
-                print("No tissue candidates from mask. Skipping.")
+                logger.warning(f"[qc] {slide_uid}: no tissue candidates from mask")
                 row = _base_summary_row()
                 row.update(
                     {
@@ -262,6 +298,7 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
                     }
                 )
                 run_summary_rows.append(row)
+                counts["empty_mask"] += 1
                 continue
 
             if len(grid) > max_candidates:
@@ -273,7 +310,7 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
 
             tiles = np.zeros((len(xy0), out_size, out_size, 3), dtype=np.uint8)
             for i, (x0, y0) in enumerate(
-                tqdm(xy0, desc=f"[qc] {sid} read", unit="patch", dynamic_ncols=True, leave=False)
+                progress(xy0, interactive=interactive, desc=f"[qc] {slide_id} read", unit="patch", leave=False)
             ):
                 tiles[i] = wsi.read_half_mag_patch(int(x0), int(y0), out_size=out_size, scale_factor=scale_factor)
 
@@ -309,9 +346,8 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
             rbcf_qc = rbcf[qc_keep]
             ad_qc = ad[qc_keep] if np.ndim(ad) else ad
 
-            print(f"Candidates(after mask): {len(grid)}  QC-pass: {len(tiles_qc)}")
             if len(tiles_qc) == 0:
-                print("No QC-passing candidates. Skipping.")
+                logger.warning(f"[qc] {slide_uid}: no QC-passing candidates from {len(grid)} mask candidates")
                 row = _base_summary_row()
                 row.update(
                     {
@@ -329,6 +365,7 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
                     }
                 )
                 run_summary_rows.append(row)
+                counts["empty_qc"] += 1
                 continue
 
             if bool(cfg["outputs"].get("write_qc_pool", False)):
@@ -364,7 +401,6 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
                     np.save(slide_out_pool / "qc_tiles_uint8.npy", tiles_qc.astype(np.uint8))
 
             if bool(cfg.get("scoring", {}).get("extract_qc_pool_only", False)):
-                print("QC-pool-only mode: skipping classical scoring/quota selection.")
                 row = _base_summary_row()
                 row.update(
                     {
@@ -382,6 +418,7 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
                     }
                 )
                 run_summary_rows.append(row)
+                counts["ok"] += 1
                 continue
 
             scores_df = compute_scores_and_types(tiles_qc, tf_qc, fs_qc, cfg)
@@ -425,7 +462,7 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
             good = int(meta_sel["type"].isin(["A", "B"]).sum())
 
             if good < int(cfg["scoring"]["min_good_patches_reject"]):
-                print(f"REJECT slide: only {good} good patches (A+B).")
+                logger.warning(f"[qc] {slide_uid}: reject slide with only {good} good patches")
                 row = _base_summary_row()
                 row.update(
                     {
@@ -443,14 +480,15 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
                     }
                 )
                 run_summary_rows.append(row)
+                counts["reject"] += 1
                 continue
 
             if good < int(cfg["scoring"]["min_good_patches_flag"]):
-                print(f"FLAG slide: only {good} good patches (A+B). Keeping outputs.")
+                logger.warning(f"[qc] {slide_uid}: flagged slide with only {good} good patches")
 
-            slide_out_coords = coords_root / sid
-            slide_out_qc = qc_root / sid
-            slide_out_patches = patches_lvl0_root / sid
+            slide_out_coords = coords_root / slide_uid
+            slide_out_qc = qc_root / slide_uid
+            slide_out_patches = patches_lvl0_root / slide_uid
             _ensure_dir(slide_out_coords)
             _ensure_dir(slide_out_qc)
             _ensure_dir(slide_out_patches)
@@ -481,6 +519,7 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
             )
             slide_summary.to_csv(slide_out_qc / "summary.csv", index=False)
             run_summary_rows.extend(slide_summary.to_dict(orient="records"))
+            counts["ok"] += 1
 
             if bool(cfg["outputs"]["write_montage"]):
                 save_montage(
@@ -496,31 +535,39 @@ def run_on_slides(slide_paths: list[str], cfg: dict) -> None:
                 for i in range(len(tiles_sel)):
                     Image.fromarray(tiles_sel[i]).save(slide_out_patches / f"{i:05d}.png")
 
-            print(f"Saved -> {slide_out_coords}")
         except Exception as e:
             err_type = type(e).__name__
             err_msg = " ".join(str(e).split())[:500]
-            print(f"[qc] {sid}: fail({err_type}: {err_msg})")
+            logger.error(f"[qc] {slide_uid}: fail({err_type}: {err_msg})")
             run_summary_rows.append(_error_summary_row(_base_summary_row(), "failed_exception", err_msg, err_type))
+            counts["error"] += 1
         finally:
             if wsi is not None:
                 try:
                     wsi.close()
                 except Exception:
                     pass
+            del tiles, tiles_qc, xy0_qc, grid_qc, tf_qc, fs_qc, bm_qc, af_qc, rbcf_qc, ad_qc
+            gc.collect()
+            reporter.update(idx, ok=counts["ok"], reject=counts["reject"], err=counts["error"])
 
     if run_summary_rows:
         run_summary_path = qc_root / "run_summary.csv"
-        run_summary = pd.DataFrame(run_summary_rows).sort_values("slide_id").reset_index(drop=True)
+        run_summary = pd.DataFrame(run_summary_rows).sort_values(["center", "slide_id"]).reset_index(drop=True)
         if run_summary_path.exists():
-            prev = pd.read_csv(run_summary_path, dtype={"slide_id": "string"})
+            prev = pd.read_csv(run_summary_path, dtype={"slide_id": "string", "slide_uid": "string"})
             prev["slide_id"] = prev["slide_id"].astype(str).str.strip()
             run_summary["slide_id"] = run_summary["slide_id"].astype(str).str.strip()
+            if "slide_uid" in prev.columns:
+                prev["slide_uid"] = prev["slide_uid"].astype(str).str.strip()
+            if "slide_uid" in run_summary.columns:
+                run_summary["slide_uid"] = run_summary["slide_uid"].astype(str).str.strip()
             run_summary = pd.concat([prev, run_summary], ignore_index=True, sort=False)
+            subset = ["slide_uid"] if "slide_uid" in run_summary.columns else ["slide_id"]
             run_summary = (
-                run_summary.drop_duplicates(subset=["slide_id"], keep="last")
-                .sort_values("slide_id")
+                run_summary.drop_duplicates(subset=subset, keep="last")
+                .sort_values(["center", "slide_id"])
                 .reset_index(drop=True)
             )
         run_summary.to_csv(run_summary_path, index=False)
-        print(f"Run summary -> {run_summary_path}")
+        logger.info(f"Run summary -> {run_summary_path}")

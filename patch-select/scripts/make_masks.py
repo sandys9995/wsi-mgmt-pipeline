@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import argparse
+import gc
 import numpy as np
 import openslide
 from PIL import Image
@@ -10,7 +11,6 @@ import pandas as pd
 import cv2
 import sys
 import yaml
-from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.preprocess.masking import compute_mask_status_fields, select_mask_with_fallback
@@ -21,6 +21,8 @@ from src.preprocess.strategy import (
     resolve_stain_vectors,
     retry_acceptance,
 )
+from src.utils.runlog import PeriodicProgress, progress, stage_logger
+from src.utils.slides import list_slide_records, slide_match
 
 WSI_EXTS = {".svs", ".ndpi", ".mrxs", ".tif", ".tiff"}
 
@@ -156,22 +158,6 @@ def _as_list(v):
         return []
     return [v]
 
-
-def list_wsis(wsi_dirs: list[Path], recursive: bool = True) -> list[tuple[Path, str]]:
-    files: list[tuple[Path, str]] = []
-    for wsi_dir in wsi_dirs:
-        center = wsi_dir.name
-        if recursive:
-            files.extend([(p, center) for p in sorted(wsi_dir.rglob("*")) if p.is_file() and p.suffix.lower() in WSI_EXTS])
-        else:
-            files.extend([(p, center) for p in sorted(wsi_dir.iterdir()) if p.is_file() and p.suffix.lower() in WSI_EXTS])
-    uniq: list[tuple[Path, str]] = []
-    seen: set[str] = set()
-    for p, center in files:
-        if p.stem not in seen:
-            uniq.append((p, center))
-            seen.add(p.stem)
-    return uniq
 
 def read_thumb_rgb(slide: openslide.OpenSlide, target_ds: float = 64.0) -> np.ndarray:
     # pick level whose downsample is closest to target_ds
@@ -357,6 +343,7 @@ def main():
         default=None,
         help="CPU worker hint from run config.",
     )
+    parser.add_argument("--verbose", action="store_true", help="Enable detailed console logs.")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -568,41 +555,48 @@ def main():
     else:
         print("Reference calibration: not applied (no valid reference patches found).")
 
-    wsis = list_wsis(wsi_dirs, recursive=wsi_recursive)
-    if len(wsis) == 0:
+    logger, interactive = stage_logger("mask", mask_dir, verbose=bool(args.verbose))
+    logger.info(f"Using mask profile: {mask_cfg.get('profile', 'none')}")
+    slide_records = list_slide_records(wsi_dirs, recursive=wsi_recursive, exts=WSI_EXTS)
+    if len(slide_records) == 0:
         raise RuntimeError(f"No WSIs found in {[str(p) for p in wsi_dirs]}")
 
     if args.slide_id:
         want = str(args.slide_id).strip()
-        wsis = [(p, center) for p, center in wsis if p.stem == want]
-        if not wsis:
+        slide_records = [rec for rec in slide_records if slide_match(rec, want)]
+        if not slide_records:
             raise RuntimeError(f"--slide-id '{want}' not found in WSI dirs.")
 
     n_cfg = int(mask_cfg.get("n_slides", 0))
     n_sel = int(args.n_slides) if args.n_slides is not None else n_cfg
     if n_sel > 0:
-        wsis = wsis[:n_sel]
+        slide_records = slide_records[:n_sel]
 
-    print(f"WSI dirs: {[str(p) for p in wsi_dirs]}")
-    print(f"WSI recursive scan: {wsi_recursive}")
-    print(f"Multi-worker mode: {multi_worker_mode} (workers={workers})")
-    print(f"Found {len(wsis)} WSIs")
+    logger.info(f"WSI recursive scan: {wsi_recursive}")
+    logger.info(f"Multi-worker mode: {multi_worker_mode} (workers={workers})")
+    logger.info(f"Slides: {len(slide_records)} across {len({rec['center'] for rec in slide_records})} centers")
 
     by_center_rows: dict[str, list[dict]] = {}
+    counts = {"ok": 0, "low_tissue": 0, "high_tissue": 0, "error": 0, "skip": 0}
+    reporter = PeriodicProgress(logger, "mask", total=len(slide_records), every=50)
 
-    for p, center in tqdm(wsis, desc="[mask] slides", unit="slide", dynamic_ncols=True):
-        stem = p.stem
+    for idx, rec in enumerate(progress(slide_records, interactive=interactive, desc="[mask] slides", unit="slide"), start=1):
+        p = Path(rec["path"])
+        center = str(rec["center"])
+        stem = str(rec["slide_id"])
+        slide_uid = str(rec["slide_uid"])
+        slide_relpath = str(rec["slide_relpath"])
         center_mask_dir = mask_dir / str(center) / "mask"
         center_mask_dir.mkdir(parents=True, exist_ok=True)
-        out_npy = center_mask_dir / f"{stem}.npy"
-        out_png = center_mask_dir / f"{stem}.png"
+        out_npy = center_mask_dir / f"{slide_uid}.npy"
+        out_png = center_mask_dir / f"{slide_uid}.png"
 
         overwrite = bool(mask_cfg.get("overwrite", True))
         if out_npy.exists() and not overwrite:
-            print(f"[skip] {stem} mask exists")
+            counts["skip"] += 1
+            reporter.update(idx, ok=counts["ok"], low=counts["low_tissue"], err=counts["error"], skip=counts["skip"])
             continue
 
-        print(f"[mask] {stem}")
         slide = None
         img = None
         lvl = np.nan
@@ -664,7 +658,7 @@ def main():
             stain_e = _vec_triplet(slide_cfg["stain_vector_e"])
             stain_r = _vec_triplet(slide_cfg["stain_vector_r"])
 
-            print(
+            logger.debug(
                 f"  thumb level={lvl} ds={ds:.1f} size={img.shape[1]}x{img.shape[0]} "
                 f"profile={profile_used or 'none'} sparse_canvas={sparse_canvas_mode} "
                 f"stain={stain_diag['stain_vector_source']} ({stain_diag['stain_estimation_reason']})"
@@ -784,13 +778,13 @@ def main():
                                 stats["low_tissue_retry_gain"] = retry_gain
                                 stats["low_tissue_retry_added_nonwhite_frac"] = retry_added_nonwhite_frac
                                 stats["low_tissue_retry_white_leak_delta"] = retry_white_leak_delta
-                                print(
+                                logger.debug(
                                     f"  low-tissue ROI retry accepted: roi_level={roi_lvl} ds={roi_ds:.1f} "
                                     f"gain={retry_gain*100:.2f}pp added_px={retry_added_px} "
                                     f"tissue%={new_frac*100:.2f} status={new_status_effective}"
                                 )
                             else:
-                                print(
+                                logger.debug(
                                     f"  low-tissue ROI retry rejected: roi_level={roi_lvl} ds={roi_ds:.1f} "
                                     f"gain={retry_gain*100:.2f}pp added_px={retry_added_px} "
                                     f"nonwhite={retry_added_nonwhite_frac:.3f} leak_delta={retry_white_leak_delta:.3f}"
@@ -847,12 +841,12 @@ def main():
                             )
                         )
                         soft_relax_used = True
-                        print(
+                        logger.debug(
                             f"  soft-relax retry accepted: gain={gain*100:.2f}pp "
                             f"added_nonwhite={added_nonwhite:.3f} white_leak={new_white_leak:.3f}"
                         )
                     else:
-                        print(
+                        logger.debug(
                             f"  soft-relax retry rejected: gain={gain*100:.2f}pp "
                             f"added_nonwhite={added_nonwhite:.3f} white_leak_delta={leak_delta:.3f}"
                         )
@@ -864,6 +858,8 @@ def main():
             save_preview(img, mask, out_png)
             row = {
                 "slide_id": stem,
+                "slide_uid": slide_uid,
+                "slide_relpath": slide_relpath,
                 "center": str(center),
                 "thumb_level": int(lvl),
                 "thumb_downsample": float(ds),
@@ -940,19 +936,22 @@ def main():
             }
             summary_rows.append(row)
             by_center_rows.setdefault(str(center), []).append(row)
-
-            print(
-                f"  saved: {out_npy.name}  (shape={mask.shape}, tissue%={mask.mean()*100:.2f}, "
-                f"status={stats['mask_status']} eff={stats.get('mask_status_effective', stats['mask_status'])}, "
-                f"fallback={stats['fallback_used']})"
-            )
+            status_eff = str(stats.get("mask_status_effective", stats["mask_status"]))
+            if status_eff == "low_tissue":
+                counts["low_tissue"] += 1
+            elif status_eff == "high_tissue":
+                counts["high_tissue"] += 1
+            else:
+                counts["ok"] += 1
         except Exception as e:
             err_type = type(e).__name__
             err_msg = " ".join(str(e).split())[:500]
             error_status = "read_error" if isinstance(e, openslide.OpenSlideError) else "mask_error"
-            print(f"  [error] {stem}: {err_type}: {err_msg}")
+            logger.error(f"[mask] {slide_uid} error={err_type} msg={err_msg}")
             error_row = {
                 "slide_id": stem,
+                "slide_uid": slide_uid,
+                "slide_relpath": slide_relpath,
                 "center": str(center),
                 "thumb_level": int(lvl) if np.isfinite(lvl) else np.nan,
                 "thumb_downsample": float(ds) if np.isfinite(ds) else np.nan,
@@ -998,35 +997,43 @@ def main():
             }
             summary_rows.append(error_row)
             by_center_rows.setdefault(str(center), []).append(error_row)
+            counts["error"] += 1
         finally:
             if slide is not None:
                 try:
                     slide.close()
                 except Exception:
                     pass
+            if img is not None:
+                del img
+            gc.collect()
+            reporter.update(idx, ok=counts["ok"], low=counts["low_tissue"], err=counts["error"], skip=counts["skip"])
 
     if summary_rows:
-        summary_df = pd.DataFrame(summary_rows).sort_values("slide_id").reset_index(drop=True)
+        summary_df = pd.DataFrame(summary_rows).sort_values(["center", "slide_id"]).reset_index(drop=True)
         summary_path = mask_dir / "mask_summary.csv"
         if summary_path.exists():
-            prev_df = pd.read_csv(summary_path, dtype={"slide_id": "string"})
-            prev_df["slide_id"] = prev_df["slide_id"].astype(str).str.strip()
-            summary_df["slide_id"] = summary_df["slide_id"].astype(str).str.strip()
+            prev_df = pd.read_csv(summary_path, dtype={"slide_uid": "string", "slide_id": "string"})
+            prev_df["slide_uid"] = prev_df.get("slide_uid", prev_df["slide_id"]).astype(str).str.strip()
+            summary_df["slide_uid"] = summary_df["slide_uid"].astype(str).str.strip()
             summary_df = pd.concat([prev_df, summary_df], ignore_index=True, sort=False)
             summary_df = (
-                summary_df.drop_duplicates(subset=["slide_id"], keep="last")
-                .sort_values("slide_id")
+                summary_df.drop_duplicates(subset=["slide_uid"], keep="last")
+                .sort_values(["center", "slide_id"])
                 .reset_index(drop=True)
             )
         summary_df.to_csv(summary_path, index=False)
-        print(f"Saved mask summary -> {summary_path}")
+        logger.info(f"Saved mask summary -> {summary_path}")
         for center, rows in sorted(by_center_rows.items()):
-            center_df = pd.DataFrame(rows).sort_values("slide_id").reset_index(drop=True)
+            center_df = pd.DataFrame(rows).sort_values(["center", "slide_id"]).reset_index(drop=True)
             center_summary_path = mask_dir / center / "mask" / "mask_summary.csv"
             center_summary_path.parent.mkdir(parents=True, exist_ok=True)
             center_df.to_csv(center_summary_path, index=False)
 
-    print("Done creating masks.")
+    logger.info(
+        f"Done creating masks. ok={counts['ok']} high={counts['high_tissue']} low={counts['low_tissue']} "
+        f"error={counts['error']} skip={counts['skip']}"
+    )
 
 
 if __name__ == "__main__":

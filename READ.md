@@ -61,14 +61,26 @@ python -u scripts/check_mask_qc_gate.py \
   --run-summary data/out/qc/run_summary.csv
 ```
 
-## 9) Long Run in Background (Cluster Style)
+## 9) Long Run in Tmux (Recommended)
+
+Prefer `tmux` over `nohup` for production runs. `tqdm` stays clean on a real TTY, and the pipeline still writes internal stage logs under `results/logs/`.
+
+```bash
+tmux new -s wsi-e2e
+python -u scripts/run_e2e.py --config configs/pilot.yaml --multi-worker-mode --cpu-workers 16 --io-workers 8
+# detach: Ctrl-b d
+# reattach later:
+tmux attach -t wsi-e2e
+```
+
+## 10) Long Run in Background (Fallback)
 
 ```bash
 nohup python -u scripts/run_e2e.py --config configs/pilot.yaml > logs/e2e_full_$(date +%F_%H%M).log 2>&1 &
 tail -f logs/e2e_full_*.log
 ```
 
-## 10) Multi-Worker End-to-End Run (Cluster)
+## 11) Multi-Worker End-to-End Run (Cluster)
 
 Use this to activate end-to-end worker mode from one command.
 
@@ -88,7 +100,15 @@ Notes:
 - Use `--continue-on-fail` to continue even if non-gate stages fail.
 - Gate uses adaptive thresholds by default (small pilots no longer fail only due sample size).
 - Resume is enabled by default (`run.resume: true`) so reruns skip slides that already have QC outputs.
-- Long loops now show `tqdm` progress bars in `run_e2e.py`, `make_masks.py`, `run_pilot.py`, `run_tumor_gate_pilot.py`, `run_uni_features.py`, and QC patch reads in `src/select/pipeline.py`.
+- Interactive terminal or `tmux`: progress bars are shown.
+- Redirected or background logs: progress bars are disabled automatically and replaced by periodic status lines.
+- Detailed internal logs are written under the stage output root in `logs/`:
+  - `data/out/logs/e2e.log`
+  - `data/out/logs/qc_driver.log`
+  - `data/out/logs/tumor_gate.log`
+  - `data/out/logs/uni.log`
+  - `data/masks/logs/mask.log`
+- Slide outputs now use `slide_uid` internally, so duplicate basenames across nested folders do not overwrite each other.
 
 ## Result Layout
 
@@ -103,22 +123,22 @@ results/
 ├── uni_run_summary.csv
 ├── <center>/
 │   ├── mask/
-│   │   ├── <slide_id>.npy
-│   │   ├── <slide_id>.png
+│   │   ├── <slide_uid>.npy
+│   │   ├── <slide_uid>.png
 │   │   └── mask_summary.csv
 │   ├── qc/
 │   │   ├── run_summary.csv
-│   │   └── <slide_id>/
+│   │   └── <slide_uid>/
 │   ├── qc_pool/
-│   │   └── <slide_id>/
+│   │   └── <slide_uid>/
 │   ├── coords/
-│   │   └── <slide_id>/
+│   │   └── <slide_uid>/
 │   ├── tumor_gate/
 │   │   ├── run_summary.csv
-│   │   └── <slide_id>/
+│   │   └── <slide_uid>/
 │   └── uni/
 │       ├── run_summary.csv
-│       └── <slide_id>/
+│       └── <slide_uid>/
 ```
 
 Root merged summaries:
