@@ -369,7 +369,7 @@ def run_on_slides(
                 continue
 
             if bool(cfg["outputs"].get("write_qc_pool", False)):
-                slide_out_pool = qc_pool_root / sid
+                slide_out_pool = qc_pool_root / slide_uid
                 _ensure_dir(slide_out_pool)
                 qc_meta = pd.DataFrame(
                     {
