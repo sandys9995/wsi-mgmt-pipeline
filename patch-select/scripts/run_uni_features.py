@@ -541,7 +541,7 @@ def main():
                     collate_fn=_collate_wsi_patch_batch,
                     persistent_workers=bool(io_workers > 0),
                 )
-                for batch_pack in progress(loader, interactive=interactive, desc=f"[uni] {sid} batches", unit="batch", leave=False):
+                for batch_pack in loader:
                     if batch_pack is None:
                         continue
                     batch_idxs, patches, batch_fail = batch_pack
@@ -578,14 +578,7 @@ def main():
                     continue
 
                 try:
-                    for i, r in progress(
-                        coords_df.iterrows(),
-                        interactive=interactive,
-                        total=len(coords_df),
-                        desc=f"[uni] {sid} patches",
-                        unit="patch",
-                        leave=False,
-                    ):
+                    for i, r in coords_df.iterrows():
                         x0 = _to_int(r.get("x0", 0), 0)
                         y0 = _to_int(r.get("y0", 0), 0)
                         try:

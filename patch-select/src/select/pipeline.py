@@ -309,9 +309,7 @@ def run_on_slides(
             xy0 = _clip_level0_coords(xy0, wsi, read_size=read_size)
 
             tiles = np.zeros((len(xy0), out_size, out_size, 3), dtype=np.uint8)
-            for i, (x0, y0) in enumerate(
-                progress(xy0, interactive=interactive, desc=f"[qc] {slide_id} read", unit="patch", leave=False)
-            ):
+            for i, (x0, y0) in enumerate(xy0):
                 tiles[i] = wsi.read_half_mag_patch(int(x0), int(y0), out_size=out_size, scale_factor=scale_factor)
 
             tf = tissue_fraction(tiles, cfg=cfg.get("qc", {}))

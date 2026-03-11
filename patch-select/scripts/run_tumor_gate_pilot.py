@@ -303,7 +303,7 @@ def score_from_tiles(
     probs_out: list[float] = []
     fail_count = 0
 
-    for i in progress(range(len(meta)), interactive=interactive, desc=f"[tumor-gate] {sid}", unit="patch"):
+    for i in range(len(meta)):
         try:
             patch = tiles[i]
             pil = Image.fromarray(patch, mode="RGB")
@@ -454,7 +454,7 @@ def score_slide(
 
     try:
         coords = meta[["x0", "y0"]].to_numpy(dtype=np.int32)
-        for i, (x0, y0) in enumerate(progress(coords, interactive=interactive, desc=f"[tumor-gate] {sid}", unit="patch")):
+        for i, (x0, y0) in enumerate(coords):
             try:
                 patch = wsi.read_half_mag_patch(
                     int(x0), int(y0), out_size=out_size, scale_factor=scale_factor

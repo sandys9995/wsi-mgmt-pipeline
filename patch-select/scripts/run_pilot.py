@@ -243,12 +243,14 @@ def main():
         logger.info("No pending slides across all centers. Nothing to run.")
         return
 
+    worker_interactive = interactive and not (multi_worker_mode and workers > 1 and len(center_jobs) > 1)
+
     if multi_worker_mode and workers > 1 and len(center_jobs) > 1:
         n_pool = min(workers, len(center_jobs))
         logger.info(f"Running QC extraction in parallel across centers (workers={n_pool})")
         with ThreadPoolExecutor(max_workers=n_pool) as ex:
             fut_map = {
-                ex.submit(run_on_slides, center_slides, center_cfg, logger, interactive): center
+                ex.submit(run_on_slides, center_slides, center_cfg, logger, worker_interactive): center
                 for center, center_slides, center_cfg in center_jobs
             }
             for fut in as_completed(fut_map):
@@ -263,7 +265,7 @@ def main():
         for center, center_slides, center_cfg in progress(
             center_jobs, interactive=interactive, desc="[qc] center runs", unit="center"
         ):
-            run_on_slides(center_slides, center_cfg, logger, interactive)
+            run_on_slides(center_slides, center_cfg, logger, worker_interactive)
             gc.collect()
 
     # Aggregate per-center QC summaries into a global summary for gate checks.
