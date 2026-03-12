@@ -214,6 +214,12 @@ def run_on_slides(
     max_brightness = cfg["qc"].get("max_brightness", None)
     max_artifact_frac = float(cfg["qc"].get("max_artifact_frac", 0.30))
     max_rbc_frac = float(cfg["qc"].get("max_rbc_frac", 0.45))
+    qc_chunk_size = max(1, int(cfg["qc"].get("chunk_size", 1024)))
+    extract_qc_pool_only = bool(cfg.get("scoring", {}).get("extract_qc_pool_only", False))
+    keep_qc_tiles = (not extract_qc_pool_only) or bool(cfg["outputs"].get("write_qc_tiles_npy", False))
+    logger.info(
+        f"[{progress_label}] chunk_size={qc_chunk_size} extract_qc_pool_only={extract_qc_pool_only} keep_qc_tiles={keep_qc_tiles}"
+    )
 
     for idx, slide_item in enumerate(progress(slide_paths, interactive=interactive, desc="[qc] slides", unit="slide"), start=1):
         if isinstance(slide_item, dict):
@@ -314,43 +320,76 @@ def run_on_slides(
             xy0 = _mask_xy_to_level0_xy(grid, wsi, mask_level)
             xy0 = _clip_level0_coords(xy0, wsi, read_size=read_size)
 
-            tiles = np.zeros((len(xy0), out_size, out_size, 3), dtype=np.uint8)
-            for i, (x0, y0) in enumerate(xy0):
-                tiles[i] = wsi.read_half_mag_patch(int(x0), int(y0), out_size=out_size, scale_factor=scale_factor)
+            tile_chunks: list[np.ndarray] = []
+            xy0_chunks: list[np.ndarray] = []
+            grid_chunks: list[np.ndarray] = []
+            tf_chunks: list[np.ndarray] = []
+            fs_chunks: list[np.ndarray] = []
+            bm_chunks: list[np.ndarray] = []
+            af_chunks: list[np.ndarray] = []
+            rbcf_chunks: list[np.ndarray] = []
+            ad_chunks: list[np.ndarray] = []
 
-            tf = tissue_fraction(tiles, cfg=cfg.get("qc", {}))
-            fs = focus_score(tiles)
-            bm = brightness_mean(tiles)
-            af = artifact_fraction(tiles)
-            rbcf = rbc_fraction(tiles, cfg=cfg.get("qc", {}))
+            for start in range(0, len(xy0), qc_chunk_size):
+                stop = min(start + qc_chunk_size, len(xy0))
+                xy0_chunk = xy0[start:stop]
+                grid_chunk = grid[start:stop]
+                tiles_chunk = np.zeros((len(xy0_chunk), out_size, out_size, 3), dtype=np.uint8)
+                for i, (x0, y0) in enumerate(xy0_chunk):
+                    tiles_chunk[i] = wsi.read_half_mag_patch(
+                        int(x0), int(y0), out_size=out_size, scale_factor=scale_factor
+                    )
 
-            qc_keep = (
-                (tf >= min_tissue)
-                & (fs >= min_focus)
-                & (bm >= min_brightness)
-                & (af <= max_artifact_frac)
-                & (rbcf <= max_rbc_frac)
-            )
-            if max_brightness is not None:
-                qc_keep &= bm <= float(max_brightness)
+                tf_chunk = tissue_fraction(tiles_chunk, cfg=cfg.get("qc", {}))
+                fs_chunk = focus_score(tiles_chunk)
+                bm_chunk = brightness_mean(tiles_chunk)
+                af_chunk = artifact_fraction(tiles_chunk)
+                rbcf_chunk = rbc_fraction(tiles_chunk, cfg=cfg.get("qc", {}))
 
-            if bool(cfg["qc"]["reject_adipose"]):
-                ad = adipose_score(tiles)
-                qc_keep &= ad < float(cfg["qc"]["adipose_whiteness"])
+                qc_keep = (
+                    (tf_chunk >= min_tissue)
+                    & (fs_chunk >= min_focus)
+                    & (bm_chunk >= min_brightness)
+                    & (af_chunk <= max_artifact_frac)
+                    & (rbcf_chunk <= max_rbc_frac)
+                )
+                if max_brightness is not None:
+                    qc_keep &= bm_chunk <= float(max_brightness)
+
+                if bool(cfg["qc"]["reject_adipose"]):
+                    ad_chunk = adipose_score(tiles_chunk)
+                    qc_keep &= ad_chunk < float(cfg["qc"]["adipose_whiteness"])
+                else:
+                    ad_chunk = np.full(len(tiles_chunk), np.nan, dtype=np.float32)
+
+                if np.any(qc_keep):
+                    xy0_chunks.append(xy0_chunk[qc_keep].copy())
+                    grid_chunks.append(grid_chunk[qc_keep].copy())
+                    tf_chunks.append(tf_chunk[qc_keep].copy())
+                    fs_chunks.append(fs_chunk[qc_keep].copy())
+                    bm_chunks.append(bm_chunk[qc_keep].copy())
+                    af_chunks.append(af_chunk[qc_keep].copy())
+                    rbcf_chunks.append(rbcf_chunk[qc_keep].copy())
+                    ad_chunks.append(ad_chunk[qc_keep].copy())
+                    if keep_qc_tiles:
+                        tile_chunks.append(tiles_chunk[qc_keep].copy())
+
+                del tiles_chunk, tf_chunk, fs_chunk, bm_chunk, af_chunk, rbcf_chunk, ad_chunk, xy0_chunk, grid_chunk
+
+            if keep_qc_tiles and tile_chunks:
+                tiles_qc = np.concatenate(tile_chunks, axis=0)
             else:
-                ad = np.full(len(tiles), np.nan, dtype=np.float32)
+                tiles_qc = np.zeros((0, out_size, out_size, 3), dtype=np.uint8)
+            xy0_qc = np.concatenate(xy0_chunks, axis=0) if xy0_chunks else np.zeros((0, 2), dtype=np.int32)
+            grid_qc = np.concatenate(grid_chunks, axis=0) if grid_chunks else np.zeros((0, 2), dtype=np.int32)
+            tf_qc = np.concatenate(tf_chunks, axis=0) if tf_chunks else np.zeros((0,), dtype=np.float32)
+            fs_qc = np.concatenate(fs_chunks, axis=0) if fs_chunks else np.zeros((0,), dtype=np.float32)
+            bm_qc = np.concatenate(bm_chunks, axis=0) if bm_chunks else np.zeros((0,), dtype=np.float32)
+            af_qc = np.concatenate(af_chunks, axis=0) if af_chunks else np.zeros((0,), dtype=np.float32)
+            rbcf_qc = np.concatenate(rbcf_chunks, axis=0) if rbcf_chunks else np.zeros((0,), dtype=np.float32)
+            ad_qc = np.concatenate(ad_chunks, axis=0) if ad_chunks else np.zeros((0,), dtype=np.float32)
 
-            tiles_qc = tiles[qc_keep]
-            xy0_qc = xy0[qc_keep]
-            grid_qc = grid[qc_keep]
-            tf_qc = tf[qc_keep]
-            fs_qc = fs[qc_keep]
-            bm_qc = bm[qc_keep]
-            af_qc = af[qc_keep]
-            rbcf_qc = rbcf[qc_keep]
-            ad_qc = ad[qc_keep] if np.ndim(ad) else ad
-
-            if len(tiles_qc) == 0:
+            if len(xy0_qc) == 0:
                 logger.warning(f"[qc] {slide_uid}: no QC-passing candidates from {len(grid)} mask candidates")
                 row = _base_summary_row()
                 row.update(
@@ -404,13 +443,13 @@ def run_on_slides(
                 if bool(cfg["outputs"].get("write_qc_tiles_npy", False)):
                     np.save(slide_out_pool / "qc_tiles_uint8.npy", tiles_qc.astype(np.uint8))
 
-            if bool(cfg.get("scoring", {}).get("extract_qc_pool_only", False)):
+            if extract_qc_pool_only:
                 row = _base_summary_row()
                 row.update(
                     {
                         "candidates_after_mask": int(len(grid)),
-                        "qc_pass": int(len(tiles_qc)),
-                        "selected_count": int(len(tiles_qc)),
+                        "qc_pass": int(len(xy0_qc)),
+                        "selected_count": int(len(xy0_qc)),
                         "good_count": np.nan,
                         "typeA": np.nan,
                         "typeB": np.nan,

@@ -827,26 +827,40 @@ def main():
                         }
                         row = _apply_uni_gate_fields(row, tg_cfg)
                     used_input_source = "filter_only_existing_scores"
-                elif tg_cfg["prefer_qc_pool"] and qc_pool_meta_path.exists() and qc_pool_tiles_path.exists():
-                    qc_meta = pd.read_csv(qc_pool_meta_path)
-                    qc_tiles = np.load(qc_pool_tiles_path, mmap_mode=None)
-                    row = score_from_tiles(
-                        sid=sid,
-                        slide_uid=slide_uid,
-                        meta=qc_meta,
-                        tiles=qc_tiles,
-                        out_slide_dir=out_slide_dir,
-                        cfg=tg_cfg,
-                        model=model,
-                        normalizer=normalizer,
-                        model_device=model_device,
-                        norm_device=norm_device,
-                        interactive=interactive,
-                    )
+                elif tg_cfg["prefer_qc_pool"] and qc_pool_meta_path.exists():
+                    if qc_pool_tiles_path.exists():
+                        qc_meta = pd.read_csv(qc_pool_meta_path)
+                        qc_tiles = np.load(qc_pool_tiles_path, mmap_mode=None)
+                        row = score_from_tiles(
+                            sid=sid,
+                            slide_uid=slide_uid,
+                            meta=qc_meta,
+                            tiles=qc_tiles,
+                            out_slide_dir=out_slide_dir,
+                            cfg=tg_cfg,
+                            model=model,
+                            normalizer=normalizer,
+                            model_device=model_device,
+                            norm_device=norm_device,
+                            interactive=interactive,
+                        )
+                        used_input_source = "qc_pool_tiles"
+                        del qc_tiles, qc_meta
+                    else:
+                        row = score_slide(
+                            slide_rec=rec,
+                            selected_meta_path=qc_pool_meta_path,
+                            out_slide_dir=out_slide_dir,
+                            cfg=tg_cfg,
+                            model=model,
+                            normalizer=normalizer,
+                            model_device=model_device,
+                            norm_device=norm_device,
+                            interactive=interactive,
+                        )
+                        used_input_source = "qc_pool_coords"
                     row["selected_meta_missing"] = False
-                    used_input_source = "qc_pool_tiles"
                     row = _apply_uni_gate_fields(row, tg_cfg)
-                    del qc_tiles, qc_meta
                 elif not selected_meta_path.exists():
                     row = {
                         "slide_id": sid,

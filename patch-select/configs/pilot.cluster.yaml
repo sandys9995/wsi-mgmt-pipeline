@@ -180,6 +180,7 @@ candidate_grid:
 qc:
   min_tissue_frac: 0.80
   min_focus: 50.0
+  chunk_size: 1024
   reject_adipose: true
   adipose_whiteness: 0.75
   min_brightness: 80

@@ -172,6 +172,7 @@ qc:
 
   min_tissue_frac: 0.80
   min_focus: 50.0          # Tenengrad/Laplacian-like threshold (tune after montage)
+  chunk_size: 1024         # memory bound only; does not change candidate density or thresholds
   reject_adipose: true
   adipose_whiteness: 0.75   # heuristic threshold (tune)
   # optional, keep false for v1
