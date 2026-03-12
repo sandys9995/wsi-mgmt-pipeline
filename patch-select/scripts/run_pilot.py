@@ -250,7 +250,14 @@ def main():
         logger.info(f"Running QC extraction in parallel across centers (workers={n_pool})")
         with ThreadPoolExecutor(max_workers=n_pool) as ex:
             fut_map = {
-                ex.submit(run_on_slides, center_slides, center_cfg, logger, worker_interactive): center
+                ex.submit(
+                    run_on_slides,
+                    center_slides,
+                    center_cfg,
+                    logger,
+                    worker_interactive,
+                    f"qc center={center}",
+                ): center
                 for center, center_slides, center_cfg in center_jobs
             }
             for fut in as_completed(fut_map):
@@ -265,7 +272,7 @@ def main():
         for center, center_slides, center_cfg in progress(
             center_jobs, interactive=interactive, desc="[qc] center runs", unit="center"
         ):
-            run_on_slides(center_slides, center_cfg, logger, worker_interactive)
+            run_on_slides(center_slides, center_cfg, logger, worker_interactive, f"qc center={center}")
             gc.collect()
 
     # Aggregate per-center QC summaries into a global summary for gate checks.

@@ -155,6 +155,7 @@ def run_on_slides(
     cfg: dict,
     logger=None,
     interactive: bool | None = None,
+    progress_label: str | None = None,
 ) -> None:
     from src.io.wsi import open_wsi
     from src.preprocess.mask import load_mask
@@ -188,7 +189,12 @@ def run_on_slides(
     _ensure_dir(patches_lvl0_root)
     run_summary_rows: list[dict] = []
     mask_diag = _load_mask_summary(mask_dir)
-    reporter = PeriodicProgress(logger, "qc", total=len(slide_paths), every=25)
+    if progress_label is None:
+        first_center = ""
+        if slide_paths and isinstance(slide_paths[0], dict):
+            first_center = str(slide_paths[0].get("center", "")).strip()
+        progress_label = f"qc center={first_center}" if first_center else "qc"
+    reporter = PeriodicProgress(logger, progress_label, total=len(slide_paths), every=25)
     counts = {"ok": 0, "empty_mask": 0, "empty_qc": 0, "reject": 0, "error": 0}
 
     seed = int(cfg["run"].get("seed", 1337))
