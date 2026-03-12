@@ -6,7 +6,7 @@ import numpy as np
 from pathlib import Path
 import pandas as pd
 
-from src.utils.runlog import PeriodicProgress, progress, stage_logger
+from src.utils.runlog import PeriodicProgress, log_debug_traceback, progress, stage_logger
 from src.utils.slides import slide_key_from_row
 
 def _stem(p: str) -> str:
@@ -582,6 +582,7 @@ def run_on_slides(
             err_type = type(e).__name__
             err_msg = " ".join(str(e).split())[:500]
             logger.error(f"[qc] {slide_uid}: fail({err_type}: {err_msg})")
+            log_debug_traceback(logger, prefix=f"[qc] traceback slide={slide_uid}")
             run_summary_rows.append(_error_summary_row(_base_summary_row(), "failed_exception", err_msg, err_type))
             counts["error"] += 1
         finally:

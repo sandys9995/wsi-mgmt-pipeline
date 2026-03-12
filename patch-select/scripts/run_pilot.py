@@ -15,7 +15,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.select.pipeline import run_on_slides
-from src.utils.runlog import progress, stage_logger
+from src.utils.runlog import log_debug_traceback, progress, stage_logger
 from src.utils.slides import list_slide_records, slide_key_from_row, slide_match
 
 
@@ -267,6 +267,7 @@ def main():
                     logger.info(f"Center completed: {center}")
                 except Exception as e:
                     logger.error(f"Center failed: {center} ({type(e).__name__}: {e})")
+                    log_debug_traceback(logger, prefix=f"[qc] traceback center={center}")
                     raise
     else:
         for center, center_slides, center_cfg in progress(

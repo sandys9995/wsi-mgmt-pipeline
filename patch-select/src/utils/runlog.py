@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Iterable
 
@@ -49,20 +50,34 @@ def progress(
 
 
 class PeriodicProgress:
-    def __init__(self, logger: logging.Logger, prefix: str, total: int, every: int = 50):
+    def __init__(
+        self,
+        logger: logging.Logger,
+        prefix: str,
+        total: int,
+        every: int = 50,
+        every_secs: float = 300.0,
+    ):
         self.logger = logger
         self.prefix = prefix
         self.total = max(0, int(total))
         self.every = max(1, int(every))
+        self.every_secs = max(1.0, float(every_secs))
         self.start = time.time()
         self.last_emit = 0
+        self.last_emit_ts = self.start
 
     def update(self, count: int, **stats) -> None:
         count = int(count)
-        if count < self.total and (count - self.last_emit) < self.every:
+        now = time.time()
+        due_by_count = (count - self.last_emit) >= self.every
+        due_by_time = (now - self.last_emit_ts) >= self.every_secs
+        is_final = count >= self.total
+        if not is_final and not due_by_count and not due_by_time:
             return
         self.last_emit = count
-        elapsed = max(0.0, time.time() - self.start)
+        self.last_emit_ts = now
+        elapsed = max(0.0, now - self.start)
         rate = (count / elapsed) if elapsed > 0 else 0.0
         remaining = max(0, self.total - count)
         eta_sec = (remaining / rate) if rate > 0 else 0.0
@@ -70,6 +85,16 @@ class PeriodicProgress:
         self.logger.info(
             f"[{self.prefix}] processed={count}/{self.total} elapsed={_fmt_sec(elapsed)} eta={_fmt_sec(eta_sec)} {stats_txt}".rstrip()
         )
+
+
+def log_debug_traceback(logger: logging.Logger, prefix: str = "") -> None:
+    tb = traceback.format_exc().rstrip()
+    if not tb:
+        return
+    if prefix:
+        logger.debug(f"{prefix}\n{tb}")
+    else:
+        logger.debug(tb)
 
 
 def _fmt_sec(seconds: float) -> str:

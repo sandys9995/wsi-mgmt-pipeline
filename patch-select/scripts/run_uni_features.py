@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.io.wsi import open_wsi
-from src.utils.runlog import PeriodicProgress, progress, stage_logger
+from src.utils.runlog import PeriodicProgress, log_debug_traceback, progress, stage_logger
 from src.utils.slides import list_slide_records, slide_key_from_row, slide_match
 
 WSI_EXTS = (".svs", ".ndpi", ".mrxs", ".tif", ".tiff")
@@ -493,6 +493,7 @@ def main():
                 row["elapsed_sec"] = float(time.time() - t0)
                 rows.append(row)
                 logger.error(f"[uni] {slide_uid}: fail(read coords) {e}")
+                log_debug_traceback(logger, prefix=f"[uni] traceback slide={slide_uid} stage=read_coords")
                 continue
 
             if len(coords_df) == 0:
@@ -575,6 +576,7 @@ def main():
                     row["elapsed_sec"] = float(time.time() - t0)
                     rows.append(row)
                     logger.error(f"[uni] {slide_uid}: fail(open wsi) {e}")
+                    log_debug_traceback(logger, prefix=f"[uni] traceback slide={slide_uid} stage=open_wsi")
                     continue
 
                 try:
@@ -675,6 +677,7 @@ def main():
             row["elapsed_sec"] = float(time.time() - t0)
             rows.append(row)
             logger.error(f"[uni] {slide_uid}: unexpected failure {type(e).__name__}: {e}")
+            log_debug_traceback(logger, prefix=f"[uni] traceback slide={slide_uid} stage=unexpected")
         finally:
             gc.collect()
             if model_device == "cuda":

@@ -18,7 +18,7 @@ from torchstain.torch.normalizers.macenko import TorchMacenkoNormalizer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.io.wsi import open_wsi
-from src.utils.runlog import PeriodicProgress, progress, stage_logger
+from src.utils.runlog import PeriodicProgress, log_debug_traceback, progress, stage_logger
 from src.utils.slides import list_slide_records, slide_key_from_row, slide_match
 
 
@@ -942,6 +942,7 @@ def main():
                     }
                 )
                 logger.error(f"[tumor-gate] {slide_uid}: unexpected failure {type(e).__name__}: {e}")
+                log_debug_traceback(logger, prefix=f"[tumor-gate] traceback slide={slide_uid}")
             finally:
                 gc.collect()
                 if model_device == "cuda":
